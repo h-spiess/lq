@@ -5,11 +5,11 @@ use super::common::{
     resolve_document_layout_roots,
 };
 use crate::ast::{Document, NodeId, NodeKind};
-use crate::query::query;
+use crate::query::{build_traversal_state_index, query};
 use crate::schema::{
     HeadingLevel, default_heading_hierarchy, extract_document_layout_context, get_schema_for_class,
 };
-use crate::tracked_changes::annotate_changes;
+use crate::tracked_changes::{annotate_changes, annotate_changes_with_state};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -62,15 +62,14 @@ fn child_count_indicator(children: &[Value]) -> String {
 }
 
 /// Structural cutoff on an already-annotated JSON tree (plan: annotate then truncate).
-fn truncate_json(value: &Value, max_depth: usize, current_depth: usize) -> Value {
-    let Some(obj) = value.as_object() else {
-        return value.clone();
+fn truncate_json(value: Value, max_depth: usize, current_depth: usize) -> Value {
+    let Value::Object(mut obj) = value else {
+        return value;
     };
-    let children = obj
-        .get("children")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let children = match obj.remove("children") {
+        Some(Value::Array(children)) => children,
+        _ => Vec::new(),
+    };
     if current_depth >= max_depth {
         return json!({
             "type": "document",
@@ -79,23 +78,25 @@ fn truncate_json(value: &Value, max_depth: usize, current_depth: usize) -> Value
     }
     let new_children: Vec<Value> = children
         .into_iter()
-        .map(|child| {
+        .map(|mut child| {
             if child.get("type").and_then(Value::as_str) == Some("block") {
+                let children = child
+                    .as_object_mut()
+                    .and_then(|obj| obj.remove("children"))
+                    .unwrap_or_else(|| json!([]));
                 let nested = json!({
                     "type": "document",
-                    "children": child.get("children").cloned().unwrap_or(json!([])),
+                    "children": children,
                 });
-                let truncated = truncate_json(&nested, max_depth, current_depth + 1);
-                let mut block = child;
-                if let Some(obj) = block.as_object_mut()
-                    && let Some(kids) = truncated.get("children")
+                let truncated = truncate_json(nested, max_depth, current_depth + 1);
+                if let Some(obj) = child.as_object_mut()
+                    && let Value::Object(mut truncated) = truncated
+                    && let Some(kids) = truncated.remove("children")
                 {
-                    obj.insert("children".into(), kids.clone());
+                    obj.insert("children".into(), kids);
                 }
-                block
-            } else {
-                child
             }
+            child
         })
         .collect();
     json!({
@@ -278,7 +279,16 @@ pub fn run_dump(
                     "--depth must be an integer (Part=-1, Chapter=0, Section=1, ...).",
                 ));
             }
-            Some(trimmed.parse::<i32>().unwrap_or(0))
+            Some(trimmed.parse::<i32>().map_err(|_| {
+                CliError::new(
+                    "INVALID_FLAG",
+                    format!(
+                        "--depth is out of range. Use an integer from {} to {} (Part=-1, Chapter=0, Section=1, ...).",
+                        i32::MIN,
+                        i32::MAX
+                    ),
+                )
+            })?)
         } else {
             None
         };
@@ -315,6 +325,19 @@ pub fn run_dump(
         (Vec::new(), true)
     };
 
+    let traversal = if use_full_ast {
+        None
+    } else {
+        Some(build_traversal_state_index(ast, ast.root()))
+    };
+    let annotate_selected = |root| {
+        annotate_changes_with_state(
+            ast,
+            root,
+            traversal.as_ref().and_then(|index| index.get(&root)),
+        )
+    };
+
     if let Some(ref raw) = depth_str {
         let trimmed = raw.trim();
         if !trimmed.bytes().all(|b| b.is_ascii_digit()) || trimmed.is_empty() {
@@ -323,7 +346,15 @@ pub fn run_dump(
                 "--depth must be a non-negative integer.",
             ));
         }
-        let depth: usize = trimmed.parse().unwrap_or(0);
+        let depth: usize = trimmed.parse().map_err(|_| {
+            CliError::new(
+                "INVALID_FLAG",
+                format!(
+                    "--depth is out of range. Use a non-negative integer up to {}.",
+                    usize::MAX
+                ),
+            )
+        })?;
         if use_full_ast {
             let max_depth = compute_max_depth(ast, &ast.node(ast.root()).children, 0);
             if depth > max_depth {
@@ -333,13 +364,13 @@ pub fn run_dump(
                 print_json(json!({ "data": annotate_changes(ast, ast.root()) }));
             } else {
                 let annotated = annotate_changes(ast, ast.root());
-                print_json(json!({ "data": truncate_json(&annotated, depth, 0) }));
+                print_json(json!({ "data": truncate_json(annotated, depth, 0) }));
             }
         } else {
             let results: Vec<Value> = roots
                 .iter()
                 .map(|&root| {
-                    let wrapped = wrap_as_doc(annotate_changes(ast, root));
+                    let wrapped = wrap_as_doc(annotate_selected(root));
                     let max_depth = compute_max_depth(ast, &[root], 0);
                     if depth > max_depth {
                         push_warning(format!(
@@ -347,7 +378,7 @@ pub fn run_dump(
                         ));
                         wrapped
                     } else {
-                        truncate_json(&wrapped, depth, 0)
+                        truncate_json(wrapped, depth, 0)
                     }
                 })
                 .collect();
@@ -366,7 +397,7 @@ pub fn run_dump(
     } else {
         let docs: Vec<Value> = roots
             .iter()
-            .map(|&root| wrap_as_doc(annotate_changes(ast, root)))
+            .map(|&root| wrap_as_doc(annotate_selected(root)))
             .collect();
         let data = if roots.len() == 1 {
             docs.into_iter().next().unwrap_or(Value::Null)

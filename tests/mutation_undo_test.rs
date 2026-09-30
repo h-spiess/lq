@@ -76,6 +76,137 @@ fn labels(v: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[test]
+fn maintenance_replay_labels_keep_utf8_boundaries() {
+    for suffix in ["é", "中", "😀"] {
+        let env = MutationSession::tracked("Alice");
+        let inserted = format!("{}{suffix} more", "a".repeat(59));
+        let file = env.write_lyx(
+            "unicode.lyx",
+            &format!(
+                "\\begin_layout Standard\n\\change_inserted 1 1700000000\n{inserted}\n\\change_unchanged\ntail\n\\end_layout\n"
+            ),
+            "\\author 1 \"Alice\"\n\\tracking_changes true\n",
+        );
+        let undone = env.run(&["undo", path_arg(&file), "layout[Standard]"]);
+        assert_eq!(undone["undone_changes"], json!(1));
+        assert_eq!(
+            labels(&undone),
+            vec![format!("change_inserted{{{}...}}", "a".repeat(59))]
+        );
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(!text.contains(&inserted));
+        assert!(text.contains("tail"));
+        lq::parse(&text, false).unwrap();
+    }
+}
+
+#[test]
+fn maintenance_snapshot_undo_is_independent_for_identical_files() {
+    let env = MutationSession::new();
+    let a = env.write_lyx(
+        "a.lyx",
+        "\\begin_layout Standard\nOld A\n\\end_layout\n",
+        "",
+    );
+    let b = env.write_lyx(
+        "b.lyx",
+        "\\begin_layout Standard\nOld B\n\\end_layout\n",
+        "",
+    );
+    let original_a = fs::read(&a).unwrap();
+    let original_b = fs::read(&b).unwrap();
+    for file in [&a, &b] {
+        let result = env.run(&["set", path_arg(file), "layout[Standard]", "Same"]);
+        assert_eq!(result["modified_nodes"], json!(1));
+    }
+    assert_eq!(fs::read(&a).unwrap(), fs::read(&b).unwrap());
+    let first = env.run(&["undo", path_arg(&a)]);
+    assert_eq!(first["method"], "snapshot");
+    assert_eq!(fs::read(&a).unwrap(), original_a);
+    let second = env.run(&["undo", path_arg(&b)]);
+    assert_eq!(second["method"], "snapshot");
+    assert_eq!(fs::read(&b).unwrap(), original_b);
+}
+
+#[test]
+fn maintenance_snapshot_undo_cannot_use_another_paths_snapshot() {
+    let env = MutationSession::new();
+    let original = env.write_lyx(
+        "original.lyx",
+        "\\begin_layout Standard\nOld\n\\end_layout\n",
+        "",
+    );
+    let before = fs::read(&original).unwrap();
+    env.run(&["set", path_arg(&original), "layout[Standard]", "Same"]);
+    let copy = env.work.path().join("copy.lyx");
+    fs::copy(&original, &copy).unwrap();
+    let copied = fs::read(&copy).unwrap();
+    let refused = env.run(&["undo", path_arg(&copy)]);
+    assert_eq!(refused["code"], "UNDO_STALE");
+    assert_eq!(fs::read(&copy).unwrap(), copied);
+    let restored = env.run(&["undo", path_arg(&original)]);
+    assert_eq!(restored["method"], "snapshot");
+    assert_eq!(fs::read(&original).unwrap(), before);
+}
+
+#[cfg(windows)]
+#[test]
+fn maintenance_snapshot_undo_accepts_windows_path_aliases() {
+    for (saved_name, alias_name) in [
+        ("CaseProbe.lyx", "caseprobe.lyx"),
+        ("Résumé.lyx", "RÉSUMÉ.lyx"),
+    ] {
+        let env = MutationSession::new();
+        let a = env.write_lyx(
+            saved_name,
+            "\\begin_layout Standard\nOld A\n\\end_layout\n",
+            "",
+        );
+        let b = env.write_lyx(
+            "b.lyx",
+            "\\begin_layout Standard\nOld B\n\\end_layout\n",
+            "",
+        );
+        let original_a = fs::read(&a).unwrap();
+        let original_b = fs::read(&b).unwrap();
+        for file in [&a, &b] {
+            env.run(&["set", path_arg(file), "layout[Standard]", "Same"]);
+        }
+        let alias = env.work.path().join(alias_name);
+        assert!(alias.is_file());
+        let restored_a = env.run(&["undo", path_arg(&alias)]);
+        assert_eq!(restored_a["method"], "snapshot", "{restored_a}");
+        assert_eq!(fs::read(&a).unwrap(), original_a);
+        let restored_b = env.run(&["undo", path_arg(&b)]);
+        assert_eq!(restored_b["method"], "snapshot");
+        assert_eq!(fs::read(&b).unwrap(), original_b);
+        let consumed = env.run(&["undo", path_arg(&a)]);
+        assert_eq!(consumed["code"], "UNDO_STALE");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn maintenance_snapshot_alias_edits_keep_only_one_undo_level() {
+    let env = MutationSession::new();
+    let file = env.write_lyx(
+        "CaseProbe.lyx",
+        "\\begin_layout Standard\nOld\n\\end_layout\n",
+        "",
+    );
+    let alias = env.work.path().join("caseprobe.lyx");
+    env.run(&["set", path_arg(&file), "layout[Standard]", "First"]);
+    let first = fs::read(&file).unwrap();
+    env.run(&["set", path_arg(&alias), "layout[Standard]", "Second"]);
+    let restored = env.run(&["undo", path_arg(&file)]);
+    assert_eq!(restored["method"], "snapshot");
+    assert_eq!(fs::read(&file).unwrap(), first);
+    let consumed = env.run(&["undo", path_arg(&alias)]);
+    assert_eq!(consumed["code"], "UNDO_STALE");
+    assert_eq!(fs::read(&file).unwrap(), first);
+}
+
 fn set_author(env: &MutationSession, author: &str) {
     let path = env.home.path().join(".lq/config.json");
     let mut cfg: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();

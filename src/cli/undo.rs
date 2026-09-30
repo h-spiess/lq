@@ -13,7 +13,8 @@ use crate::tracked_changes::{
     parse_change_marker, resolve_author_id, scan_region_end,
 };
 use crate::undo::{
-    SnapshotMode, clear_snapshot, collect_snapshots, find_node_path, load_snapshot, node_at_path,
+    SnapshotMode, clear_snapshot_for_file, collect_snapshots, find_node_path,
+    load_snapshot_for_file, node_at_path,
 };
 use serde_json::json;
 use std::path::Path;
@@ -135,7 +136,11 @@ pub fn run_undo(
                     undone_count += 1;
                     node_undone += 1;
                     let label_text = if text_parts.len() > 60 {
-                        format!("{}...", &text_parts[..60])
+                        let mut end = 60;
+                        while !text_parts.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}...", &text_parts[..end])
                     } else {
                         text_parts
                     };
@@ -252,7 +257,8 @@ pub fn run_undo(
 }
 
 fn snapshot_undo(doc: &mut Document, env: &MutationEnv<'_>) -> Result<(), CliError> {
-    let mut snapshot_failure = "No snapshot found for the current file content.".to_string();
+    let mut snapshot_failure =
+        "No snapshot found for this file path and current content.".to_string();
     let current_hash = match hash_file(Path::new(env.file_path)) {
         Ok(h) => h,
         Err(_) => {
@@ -262,7 +268,9 @@ fn snapshot_undo(doc: &mut Document, env: &MutationEnv<'_>) -> Result<(), CliErr
             ));
         }
     };
-    if let Some(snapshot) = load_snapshot(doc, &current_hash, env.state) {
+    if let Some(snapshot) =
+        load_snapshot_for_file(doc, Path::new(env.file_path), &current_hash, env.state)
+    {
         let mut restored_count = 0usize;
         let mut missing_count = 0usize;
         let mut restored_labels: Vec<String> = Vec::new();
@@ -322,7 +330,7 @@ fn snapshot_undo(doc: &mut Document, env: &MutationEnv<'_>) -> Result<(), CliErr
             }
             let post_hash = hash_text(&new_text);
             set_cached_ast(&post_hash, doc, env.state);
-            clear_snapshot(&current_hash, env.state);
+            clear_snapshot_for_file(Path::new(env.file_path), &current_hash, env.state);
             warn_refresh_post(env.file_path, env.refresh);
             let changes: Vec<_> = restored_labels
                 .iter()

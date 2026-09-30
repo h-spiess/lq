@@ -536,7 +536,7 @@ A region closes at the next marker because LyX keeps one active change per posit
 
 A tracked mutation also adds or updates the document header's tracking state and author table. A header-less document cannot safely receive tracked markers and is rejected before mutation.
 
-Authors are matched by name: an existing `\author <id> "<name>"` line with an optional trailing email, or a negative LyX hash ID, is still recognized and reused, so a mutation never adds a duplicate `\author` entry or misattributes markers to a fresh ID. A new name gets the next sequential ID above the largest positive ID already present."#,
+Authors are matched by name: an existing `\author <id> "<name>"` line with an optional trailing email, or a negative LyX hash ID, is still recognized and reused, so a mutation never adds a duplicate `\author` entry or misattributes markers to a fresh ID. A new name gets the next sequential ID above the largest positive ID already present. At the signed ID limit, lq uses the lowest unused positive ID."#,
             },
             HelpSection {
                 heading: "Locating tracked changes",
@@ -1347,7 +1347,9 @@ With tracking on, editing inset metadata is rejected."#,
                                          Consumes the snapshot in the selected local
                                          or global state to revert the last (tracked
                                          or plain) mutation as one unit; restores
-                                         the saved document state by path.
+                                         the saved document state by path. Each file
+                                         keeps its own snapshot, even when files
+                                         have identical contents.
 
   lq undo <file> <selector> [<substring>]
                                          Replay undo (unlimited levels). Removes the

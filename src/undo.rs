@@ -35,6 +35,22 @@ fn snapshot_path(hash: &str, state: &StatePaths) -> PathBuf {
     state.undo.join(format!("{hash}.json"))
 }
 
+fn colliding_snapshot_path(hash: &str, file_path: &str, state: &StatePaths) -> PathBuf {
+    let identity = snapshot_file_identity(file_path);
+    state.undo.join(format!(
+        "{hash}-{}.json",
+        hash_text(&identity.to_string_lossy())
+    ))
+}
+
+fn snapshot_file_identity(file_path: &str) -> PathBuf {
+    fs::canonicalize(file_path).unwrap_or_else(|_| PathBuf::from(file_path))
+}
+
+fn same_snapshot_file(a: &str, b: &str) -> bool {
+    snapshot_file_identity(a) == snapshot_file_identity(b)
+}
+
 fn path_key(path: &[usize]) -> String {
     path.iter()
         .map(|i| i.to_string())
@@ -52,13 +68,12 @@ pub fn find_node_path(doc: &Document, target: NodeId) -> Option<Vec<usize>> {
             if id == target {
                 return Some(vec![i]);
             }
-            if is_block(doc, id) {
-                let kids = doc.node(id).children.clone();
-                if let Some(sub) = walk(doc, &kids, target) {
-                    let mut path = vec![i];
-                    path.extend(sub);
-                    return Some(path);
-                }
+            if is_block(doc, id)
+                && let Some(sub) = walk(doc, &doc.node(id).children, target)
+            {
+                let mut path = vec![i];
+                path.extend(sub);
+                return Some(path);
             }
         }
         None
@@ -199,8 +214,10 @@ fn save_snapshot_inner(
         match read_text_file(&path) {
             Ok(json) => match serde_json::from_str::<Value>(&json) {
                 Ok(existing)
-                    if existing.get("filePath").and_then(|v| v.as_str())
-                        == Some(resolved.as_str()) =>
+                    if existing
+                        .get("filePath")
+                        .and_then(Value::as_str)
+                        .is_some_and(|owner| same_snapshot_file(owner, &resolved)) =>
                 {
                     let _ = fs::remove_file(&path);
                 }
@@ -220,6 +237,13 @@ fn save_snapshot_inner(
         "entries": entries_to_json(doc, entries),
     });
     let dest = snapshot_path(post_hash, state);
+    // Keep the most recent hash-only lookup while retaining other files' undo.
+    if let Some(existing) = read_snapshot_value(&dest)
+        && let Some(other_path) = existing.get("filePath").and_then(Value::as_str)
+        && !same_snapshot_file(other_path, &resolved)
+    {
+        fs::rename(&dest, colliding_snapshot_path(post_hash, other_path, state))?;
+    }
     let tmp = dest.with_extension("json.tmp");
     fs::write(
         &tmp,
@@ -237,9 +261,16 @@ pub fn load_snapshot(
     file_hash: &str,
     state: &StatePaths,
 ) -> Option<SnapshotFile> {
-    let snapshot_path = snapshot_path(file_hash, state);
-    let json = read_text_file(&snapshot_path).ok()?;
-    let value: Value = serde_json::from_str(&json).ok()?;
+    let value = read_snapshot_value(&snapshot_path(file_hash, state))?;
+    snapshot_from_value(doc, &value)
+}
+
+fn read_snapshot_value(path: &Path) -> Option<Value> {
+    let json = read_text_file(path).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+fn snapshot_from_value(doc: &mut Document, value: &Value) -> Option<SnapshotFile> {
     let file_path = value.get("filePath")?.as_str()?.to_string();
     let entries_val = value.get("entries")?;
     if !entries_val.is_array() {
@@ -249,8 +280,50 @@ pub fn load_snapshot(
     Some(SnapshotFile { file_path, entries })
 }
 
+pub(crate) fn load_snapshot_for_file(
+    doc: &mut Document,
+    file_path: &Path,
+    file_hash: &str,
+    state: &StatePaths,
+) -> Option<SnapshotFile> {
+    let resolved = resolve_file_path(file_path);
+    for path in [
+        snapshot_path(file_hash, state),
+        colliding_snapshot_path(file_hash, &resolved, state),
+    ] {
+        let Some(value) = read_snapshot_value(&path) else {
+            continue;
+        };
+        if value
+            .get("filePath")
+            .and_then(Value::as_str)
+            .is_some_and(|owner| same_snapshot_file(owner, &resolved))
+        {
+            return snapshot_from_value(doc, &value);
+        }
+    }
+    None
+}
+
 pub fn clear_snapshot(file_hash: &str, state: &StatePaths) {
     let _ = fs::remove_file(snapshot_path(file_hash, state));
+}
+
+pub(crate) fn clear_snapshot_for_file(file_path: &Path, file_hash: &str, state: &StatePaths) {
+    let resolved = resolve_file_path(file_path);
+    for path in [
+        snapshot_path(file_hash, state),
+        colliding_snapshot_path(file_hash, &resolved, state),
+    ] {
+        if read_snapshot_value(&path).is_some_and(|value| {
+            value
+                .get("filePath")
+                .and_then(Value::as_str)
+                .is_some_and(|owner| same_snapshot_file(owner, &resolved))
+        }) {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 pub struct CommitResult {

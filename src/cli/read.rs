@@ -2,9 +2,15 @@
 
 use super::common::{CliError, assert_no_selector_mistakes, print_json, push_warning};
 use crate::ast::{Document, NodeId, NodeKind};
-use crate::query::query;
-use crate::tracked_changes::{annotate_changes, extract_all_text};
+use crate::query::{build_traversal_state_index, query};
+use crate::text_utils::{
+    TextRegion, TraversalState, advance_traversal_state, enter_traversal_state, traversal_region,
+};
+use crate::tracked_changes::{
+    annotate_changes_with_state, extract_all_text, is_change_closer, is_change_opener,
+};
 use serde_json::{Map, Value, json};
+use std::collections::HashMap;
 
 fn node_label(doc: &Document, id: NodeId) -> String {
     match &doc.node(id).kind {
@@ -26,7 +32,71 @@ fn block_prefix(doc: &Document, id: NodeId) -> String {
     }
 }
 
-fn text_of_node(doc: &Document, id: NodeId) -> String {
+fn set_inline_region(out: &mut String, open: &mut TextRegion, next: TextRegion) {
+    if *open == next {
+        return;
+    }
+    if *open != TextRegion::Current {
+        out.push('}');
+    }
+    match next {
+        TextRegion::Deleted => out.push_str("\\change_deleted{"),
+        TextRegion::Inserted => out.push_str("\\change_inserted{"),
+        TextRegion::Current => {}
+    }
+    *open = next;
+}
+
+fn append_contextual_children(
+    doc: &Document,
+    node: NodeId,
+    inherited: &TraversalState,
+    out: &mut String,
+    open: &mut TextRegion,
+) {
+    let mut state = enter_traversal_state(inherited);
+    for &child in &doc.node(node).children {
+        match &doc.node(child).kind {
+            NodeKind::Property { key, value } if is_change_opener(key) || is_change_closer(key) => {
+                set_inline_region(out, open, TextRegion::Current);
+                advance_traversal_state(&mut state, key, value.as_deref());
+                set_inline_region(out, open, traversal_region(&state));
+            }
+            NodeKind::Block { tag, .. } if tag != "inset" => {
+                append_contextual_children(doc, child, &state, out, open);
+                set_inline_region(out, open, traversal_region(&state));
+            }
+            _ => {
+                set_inline_region(out, open, traversal_region(&state));
+                out.push_str(&extract_all_text(doc, child, usize::MAX, false));
+            }
+        }
+    }
+}
+
+fn contextual_text(doc: &Document, node: NodeId, state: Option<&TraversalState>) -> String {
+    if matches!(
+        doc.node(node).kind,
+        NodeKind::Property { .. } | NodeKind::Document
+    ) {
+        return extract_all_text(doc, node, usize::MAX, false);
+    }
+    let Some(state) = state.filter(|state| traversal_region(state) != TextRegion::Current) else {
+        return extract_all_text(doc, node, usize::MAX, false);
+    };
+    let mut text = String::new();
+    let mut open = TextRegion::Current;
+    set_inline_region(&mut text, &mut open, traversal_region(state));
+    if matches!(&doc.node(node).kind, NodeKind::Block { tag, .. } if tag != "inset") {
+        append_contextual_children(doc, node, state, &mut text, &mut open);
+    } else {
+        text.push_str(&extract_all_text(doc, node, usize::MAX, false));
+    }
+    set_inline_region(&mut text, &mut open, TextRegion::Current);
+    text
+}
+
+fn text_of_node(doc: &Document, id: NodeId, traversal: &HashMap<NodeId, TraversalState>) -> String {
     if let NodeKind::Block { tag, .. } = &doc.node(id).kind
         && tag == "inset"
     {
@@ -49,14 +119,14 @@ fn text_of_node(doc: &Document, id: NodeId) -> String {
                     };
                     format!(
                         "layout[{args}] {}",
-                        extract_all_text(doc, layout, usize::MAX, false).trim()
+                        contextual_text(doc, layout, traversal.get(&layout)).trim()
                     )
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
         }
     }
-    extract_all_text(doc, id, usize::MAX, false)
+    contextual_text(doc, id, traversal.get(&id))
         .trim()
         .to_string()
 }
@@ -85,6 +155,11 @@ pub fn run_read(
     assert_no_selector_mistakes(Some(selector))?;
 
     let mut result = Map::new();
+    let traversal = if !count_only || text_only {
+        build_traversal_state_index(ast, ast.root())
+    } else {
+        HashMap::new()
+    };
 
     if count_only {
         let mut tally = Map::new();
@@ -100,7 +175,7 @@ pub fn run_read(
         let mut texts = Vec::new();
         for &node in &nodes {
             let prefix = block_prefix(ast, node);
-            let text = text_of_node(ast, node);
+            let text = text_of_node(ast, node, &traversal);
             let combined = if prefix.is_empty() {
                 text
             } else {
@@ -123,7 +198,10 @@ pub fn run_read(
     }
 
     if !count_only && !text_only {
-        let data: Vec<Value> = nodes.iter().map(|&n| annotate_changes(ast, n)).collect();
+        let data: Vec<Value> = nodes
+            .iter()
+            .map(|&n| annotate_changes_with_state(ast, n, traversal.get(&n)))
+            .collect();
         result.insert("data".into(), Value::Array(data));
         result.insert("count".into(), json!(nodes.len()));
     }

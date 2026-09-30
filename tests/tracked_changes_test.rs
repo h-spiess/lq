@@ -280,6 +280,22 @@ fn parse_change_marker_js_parseint_and_space_split() {
 }
 
 #[test]
+fn core_maintenance_author_marker_preserves_signed_limits_and_prefixes() {
+    for (value, expected) in [
+        ("-2147483648 1700000000", i32::MIN),
+        ("-2147483648suffix 1700000000", i32::MIN),
+        ("+2147483647suffix 1700000000", i32::MAX),
+        ("-443692588suffix 1700000000", -443692588),
+        ("2147483648 1700000000", 0),
+        ("-2147483649 1700000000", 0),
+    ] {
+        let marker = parse_change_marker(Some(value));
+        assert_eq!(marker.author_id, expected, "{value}");
+        assert_eq!(marker.ts, "1700000000", "{value}");
+    }
+}
+
+#[test]
 fn opener_closer_predicates() {
     assert!(is_change_opener("change_deleted"));
     assert!(is_change_opener("change_inserted"));
@@ -302,6 +318,47 @@ fn dl124_a2_negative_hash_author_line_is_recognized_and_reused() {
     let id = resolve_author_id(&mut doc, "Hans Wurst");
     assert_eq!(id, -443692588);
     assert_eq!(author_values(&doc).len(), 1);
+}
+
+#[test]
+fn core_maintenance_author_minimum_hash_id_is_reused_without_header_changes() {
+    let mut doc = header_doc(&[r#"\author -2147483648 "AeFLZsV""#]);
+    let original = serialize(&doc);
+    assert_eq!(resolve_author_id(&mut doc, "AeFLZsV"), i32::MIN);
+    assert_eq!(serialize(&doc), original);
+}
+
+#[test]
+fn core_maintenance_author_maximum_hash_id_reuses_name_and_allocates_first_free() {
+    let mut doc = header_doc(&[r#"\author 2147483647 "AeFLZsU""#]);
+    let original = serialize(&doc);
+    assert_eq!(resolve_author_id(&mut doc, "AeFLZsU"), i32::MAX);
+    assert_eq!(serialize(&doc), original);
+    assert_eq!(resolve_author_id(&mut doc, "Bob"), 1);
+    assert_eq!(
+        author_values(&doc),
+        [r#"2147483647 "AeFLZsU""#, r#"1 "Bob""#]
+    );
+}
+
+#[test]
+fn core_maintenance_author_maximum_hash_id_skips_occupied_positive_ids() {
+    let mut doc = header_doc(&[
+        r#"\author 2147483647 "AeFLZsU""#,
+        r#"\author 1 "Alice""#,
+        r#"\author 2 "Carol""#,
+        r#"\author 4 "Dave""#,
+        r#"\author -2147483648 "AeFLZsV""#,
+    ]);
+    let original = serialize(&doc);
+    assert_eq!(resolve_author_id(&mut doc, "AeFLZsV"), i32::MIN);
+    assert_eq!(serialize(&doc), original);
+    assert_eq!(resolve_author_id(&mut doc, "Bob"), 3);
+    let authors = author_values(&doc);
+    assert_eq!(authors.len(), 6);
+    assert_eq!(authors.last().unwrap(), r#"3 "Bob""#);
+    assert_eq!(resolve_author_id(&mut doc, "Bob"), 3);
+    assert_eq!(author_values(&doc), authors);
 }
 
 #[test]

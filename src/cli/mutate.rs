@@ -116,11 +116,11 @@ pub fn validate_raw_insets(doc: &Document) -> Vec<String> {
                 warnings.push(w);
             }
             if matches!(doc.node(id).kind, NodeKind::Block { .. }) {
-                walk(doc, &doc.node(id).children.clone(), warnings);
+                walk(doc, &doc.node(id).children, warnings);
             }
         }
     }
-    walk(doc, &doc.node(doc.root()).children.clone(), &mut warnings);
+    walk(doc, &doc.node(doc.root()).children, &mut warnings);
     warnings
 }
 
@@ -154,7 +154,7 @@ pub fn phrase_only_in_invisible_content(doc: &Document, phrase: &str) -> bool {
                     let next = in_note || is_invisible_inset(tag, args.as_deref());
                     walk(
                         doc,
-                        &doc.node(c).children.clone(),
+                        &doc.node(c).children,
                         next,
                         phrase,
                         found_invisible,
@@ -167,7 +167,7 @@ pub fn phrase_only_in_invisible_content(doc: &Document, phrase: &str) -> bool {
     }
     walk(
         doc,
-        &doc.node(doc.root()).children.clone(),
+        &doc.node(doc.root()).children,
         false,
         phrase,
         &mut found_invisible,

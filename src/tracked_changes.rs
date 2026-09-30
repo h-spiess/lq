@@ -4,12 +4,12 @@ use crate::ast::{Document, NodeId, NodeKind};
 use crate::query::{ScopePredicate, ScopeState};
 use crate::registry::is_inline_style_key;
 use crate::text_utils::{
-    ConcatOpts, TextSegment, TraversalState, advance_change_depths, advance_traversal_state,
-    concatenate_text_nodes, create_traversal_state, enter_traversal_state, map_pos_to_segment,
-    traversal_change, traversal_region,
+    ConcatOpts, TextRegion, TextSegment, TraversalState, advance_change_depths,
+    advance_traversal_state, concatenate_text_nodes, create_traversal_state, enter_traversal_state,
+    map_pos_to_segment, traversal_change, traversal_region,
 };
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn is_change_opener(key: &str) -> bool {
@@ -34,22 +34,16 @@ fn js_parse_int(s: &str) -> Option<i32> {
     }
     let bytes = s.as_bytes();
     let mut i = 0;
-    let mut neg = false;
-    if bytes[0] == b'+' {
-        i = 1;
-    } else if bytes[0] == b'-' {
-        neg = true;
+    if bytes[0] == b'+' || bytes[0] == b'-' {
         i = 1;
     }
     if i >= bytes.len() || !bytes[i].is_ascii_digit() {
         return None;
     }
-    let start = i;
     while i < bytes.len() && bytes[i].is_ascii_digit() {
         i += 1;
     }
-    let n: i32 = s[start..i].parse().ok()?;
-    Some(if neg { -n } else { n })
+    s[..i].parse().ok()
 }
 
 fn js_int_gt(a: &str, b: &str) -> bool {
@@ -160,12 +154,9 @@ pub fn get_header(doc: &Document) -> Option<NodeId> {
 fn parse_author_line(value: &str) -> Option<(i32, String)> {
     let bytes = value.as_bytes();
     let mut i = 0;
-    let neg = if bytes.first() == Some(&b'-') {
+    if bytes.first() == Some(&b'-') {
         i = 1;
-        true
-    } else {
-        false
-    };
+    }
     let start = i;
     while i < bytes.len() && bytes[i].is_ascii_digit() {
         i += 1;
@@ -173,8 +164,7 @@ fn parse_author_line(value: &str) -> Option<(i32, String)> {
     if i == start {
         return None;
     }
-    let id: i32 = value[start..i].parse().ok()?;
-    let id = if neg { -id } else { id };
+    let id: i32 = value[..i].parse().ok()?;
     if i >= bytes.len() || !bytes[i].is_ascii_whitespace() {
         return None;
     }
@@ -206,6 +196,7 @@ pub fn resolve_author_id(doc: &mut Document, author_name: &str) -> i32 {
     };
     let children = doc.node(header).children.clone();
     let mut max_id = 0i32;
+    let mut positive_ids = HashSet::new();
     for id in children {
         let NodeKind::Property { key, value } = &doc.node(id).kind else {
             continue;
@@ -222,11 +213,22 @@ pub fn resolve_author_id(doc: &mut Document, author_name: &str) -> i32 {
         if name == author_name {
             return id_num;
         }
+        if id_num > 0 {
+            positive_ids.insert(id_num);
+        }
         if id_num > max_id {
             max_id = id_num;
         }
     }
-    let new_id = max_id + 1;
+    let new_id = if max_id == i32::MAX {
+        let mut candidate = 1;
+        while positive_ids.contains(&candidate) {
+            candidate += 1;
+        }
+        candidate
+    } else {
+        max_id + 1
+    };
     let prop = doc.alloc(NodeKind::Property {
         key: "author".into(),
         value: Some(format!("{new_id} \"{author_name}\"")),
@@ -267,20 +269,15 @@ fn property_json(key: &str, value: Option<&str>) -> Value {
     Value::Object(m)
 }
 
-fn annotate_walk(
-    doc: &Document,
-    node: NodeId,
-    mut deleted_depth: i32,
-    mut inserted_depth: i32,
-) -> Value {
+fn annotate_walk(doc: &Document, node: NodeId, state: &TraversalState) -> Value {
     match &doc.node(node).kind {
         NodeKind::Text { text } => {
             let mut m = Map::new();
             m.insert("type".into(), json!("text"));
             m.insert("text".into(), json!(text));
-            if deleted_depth > 0 {
+            if traversal_region(state) == TextRegion::Deleted {
                 m.insert("changeStatus".into(), json!("deleted"));
-            } else if inserted_depth > 0 {
+            } else if traversal_region(state) == TextRegion::Inserted {
                 m.insert("changeStatus".into(), json!("inserted"));
             }
             Value::Object(m)
@@ -294,20 +291,7 @@ fn annotate_walk(
             let tag = tag.clone();
             let args = args.clone();
             let is_begin_variant = *is_begin_variant;
-            let children_ids = doc.node(node).children.clone();
-            let mut children = Vec::new();
-            for child in children_ids {
-                if let NodeKind::Property { key, value } = &doc.node(child).kind
-                    && (is_change_opener(key) || is_change_closer(key))
-                {
-                    children.push(property_json(key, value.as_deref()));
-                    let depths = advance_change_depths(key, deleted_depth, inserted_depth);
-                    deleted_depth = depths.0;
-                    inserted_depth = depths.1;
-                } else {
-                    children.push(annotate_walk(doc, child, deleted_depth, inserted_depth));
-                }
-            }
+            let children = annotate_children(doc, node, state);
             let mut m = Map::new();
             m.insert("type".into(), json!("block"));
             m.insert("tag".into(), json!(tag));
@@ -319,11 +303,7 @@ fn annotate_walk(
             Value::Object(m)
         }
         NodeKind::Document => {
-            let children_ids = doc.node(node).children.clone();
-            let children: Vec<Value> = children_ids
-                .into_iter()
-                .map(|c| annotate_walk(doc, c, deleted_depth, inserted_depth))
-                .collect();
+            let children = annotate_children(doc, node, state);
             let mut m = Map::new();
             m.insert("type".into(), json!("document"));
             m.insert("children".into(), Value::Array(children));
@@ -332,8 +312,32 @@ fn annotate_walk(
     }
 }
 
+fn annotate_children(doc: &Document, node: NodeId, inherited: &TraversalState) -> Vec<Value> {
+    let mut state = enter_traversal_state(inherited);
+    let children_ids = doc.node(node).children.clone();
+    let mut children = Vec::with_capacity(children_ids.len());
+    for child in children_ids {
+        children.push(annotate_walk(doc, child, &state));
+        if let NodeKind::Property { key, value } = &doc.node(child).kind
+            && (is_change_opener(key) || is_change_closer(key))
+        {
+            advance_traversal_state(&mut state, key, value.as_deref());
+        }
+    }
+    children
+}
+
+pub(crate) fn annotate_changes_with_state(
+    doc: &Document,
+    root: NodeId,
+    state: Option<&TraversalState>,
+) -> Value {
+    let default_state = create_traversal_state();
+    annotate_walk(doc, root, state.unwrap_or(&default_state))
+}
+
 pub fn annotate_changes(doc: &Document, root: NodeId) -> Value {
-    annotate_walk(doc, root, 0, 0)
+    annotate_changes_with_state(doc, root, None)
 }
 
 pub fn annotate_changes_many(doc: &Document, nodes: &[NodeId]) -> Value {

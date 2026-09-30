@@ -1466,15 +1466,18 @@ pub fn query(doc: &Document, selector_str: &str) -> Result<Vec<NodeId>, QueryErr
                     && let Some(ref arg) = p.arg_raw
                 {
                     if let Some((a, b)) = parse_nth_match_formula(arg) {
+                        let a = i64::from(a);
+                        let b = i64::from(b);
                         next_nodes = next_nodes
                             .into_iter()
                             .enumerate()
                             .filter(|(idx, _)| {
-                                let n = (*idx as i32) + 1;
+                                let n = (*idx as i64) + 1;
                                 if a == 0 {
                                     n == b
                                 } else {
-                                    (n - b) % a == 0 && (n - b) as f64 / a as f64 >= 0.0
+                                    let difference = n - b;
+                                    difference % a == 0 && difference / a >= 0
                                 }
                             })
                             .map(|(_, id)| id)

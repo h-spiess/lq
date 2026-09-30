@@ -257,7 +257,7 @@ fn walk(
     opts: &ConcatOpts,
     segments: &mut Vec<TextSegment>,
 ) {
-    let ids = doc.node(list_owner).children.clone();
+    let ids = &doc.node(list_owner).children;
     let mut state = enter_traversal_state(inherited_state);
     for (i, &id) in ids.iter().enumerate() {
         match &doc.node(id).kind {

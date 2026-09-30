@@ -134,6 +134,86 @@ fn find_text_node<'a>(value: &'a Value, text: &str) -> Option<&'a Value> {
 }
 
 #[test]
+fn selected_tracked_text_dump_keeps_status_and_selector_group_order() {
+    let home = IsolatedHome::new();
+    let work = WorkDir::new();
+    let file = write_minimal_lyx(
+        &work,
+        "selected_tracked_text.lyx",
+        "\\textclass article\n\\author 1 \"Alice\"\n",
+        r"\begin_layout Standard
+\change_deleted 1 1
+old
+\change_inserted 1 2
+new
+\change_unchanged
+\end_layout
+",
+    );
+    let selector = "text:change(inserted), text:change(deleted)";
+    for tail in [vec![selector], vec![selector, "--depth", "1"]] {
+        let result = success_json(&run_dump_with(&file, &tail, &home, work.path()));
+        assert_eq!(result["count"], 2);
+        assert_eq!(
+            result["data"][0]["children"][0],
+            json!({"type": "text", "text": "new", "changeStatus": "inserted"})
+        );
+        assert_eq!(
+            result["data"][1]["children"][0],
+            json!({"type": "text", "text": "old", "changeStatus": "deleted"})
+        );
+    }
+}
+
+#[test]
+fn nested_tracked_block_dump_keeps_inherited_status_after_inner_change_ends() {
+    let home = IsolatedHome::new();
+    let work = WorkDir::new();
+    let file = write_minimal_lyx(
+        &work,
+        "nested_tracked_block.lyx",
+        "\\textclass article\n\\author 1 \"Alice\"\n",
+        r"\begin_layout Standard
+\change_inserted 1 1
+\begin_inset Foot
+status collapsed
+
+\begin_layout Plain Layout
+inherited
+\change_deleted 1 2
+inner
+\change_unchanged
+rest
+\end_layout
+
+\end_inset
+\change_unchanged
+\end_layout
+",
+    );
+    for tail in [
+        vec!["inset[Foot]"],
+        vec!["inset[Foot] layout[Plain Layout]"],
+        vec!["inset[Foot] layout[Plain Layout]", "--depth", "2"],
+        vec![],
+        vec!["--depth", "6"],
+    ] {
+        let result = success_json(&run_dump_with(&file, &tail, &home, work.path()));
+        for (text, status) in [
+            ("inherited", "inserted"),
+            ("inner", "deleted"),
+            ("rest", "inserted"),
+        ] {
+            assert_eq!(
+                find_text_node(&result["data"], text).unwrap()["changeStatus"],
+                status,
+                "{tail:?}: {text}"
+            );
+        }
+    }
+}
+
+#[test]
 fn cli_dump_outputs_full_cst() {
     let result = success_json(&run_fixture_dump(MAIN_FIXTURE, &[]));
     assert_eq!(result["warnings"], json!([]));
@@ -211,6 +291,62 @@ fn cli_dump_structural_depth_exceed_warnings() {
         json!(["Depth 99 exceeds subtree depth (1). Showing full subtree."])
     );
     assert_eq!(subtree["data"]["type"], "document");
+}
+
+#[test]
+fn core_maintenance_dump_depth_structural_overflow_is_rejected() {
+    let structural_overflow = format!("{}0", usize::MAX);
+    assert_error(
+        &run_fixture_dump(MAIN_FIXTURE, &["--depth", &structural_overflow]),
+        "INVALID_FLAG",
+        "out of range",
+    );
+}
+
+#[test]
+fn core_maintenance_dump_depth_toc_overflow_is_rejected() {
+    for depth in ["2147483648", "-2147483649"] {
+        assert_error(
+            &run_fixture_dump(MAIN_FIXTURE, &["--toc", "--depth", depth]),
+            "INVALID_FLAG",
+            "out of range",
+        );
+    }
+}
+
+#[test]
+fn core_maintenance_dump_depth_boundaries_keep_requested_cutoff() {
+    let structural_max = usize::MAX.to_string();
+    let full = success_json(&run_fixture_dump(MAIN_FIXTURE, &[]));
+    let maximum = success_json(&run_fixture_dump(
+        MAIN_FIXTURE,
+        &["--depth", &structural_max],
+    ));
+    assert_eq!(maximum["data"], full["data"]);
+    assert!(
+        maximum["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains(&structural_max)
+    );
+
+    let full_toc = success_json(&run_fixture_dump(MAIN_FIXTURE, &["--toc"]));
+    let maximum_toc = success_json(&run_fixture_dump(
+        MAIN_FIXTURE,
+        &["--toc", "--depth", "2147483647"],
+    ));
+    assert_eq!(maximum_toc["data"], full_toc["data"]);
+    let minimum_toc = success_json(&run_fixture_dump(
+        MAIN_FIXTURE,
+        &["--toc", "--depth", "-2147483648"],
+    ));
+    assert_eq!(minimum_toc["data"], json!([]));
+    assert!(
+        minimum_toc["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("-2147483648")
+    );
 }
 
 #[test]

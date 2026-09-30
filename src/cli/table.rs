@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 pub fn run_table(doc: &mut Document, env: &MutationEnv<'_>) -> Result<(), CliError> {
     let tokens = env.rest;
     let (picker, op) = parse_picker_op(tokens)?;
-    let traversal = env.traversal.clone();
+    let traversal = env.traversal;
 
     let tabulars = match picker {
         Picker::None => {
@@ -51,7 +51,7 @@ pub fn run_table(doc: &mut Document, env: &MutationEnv<'_>) -> Result<(), CliErr
     };
 
     let Some(op) = op else {
-        let (rows, warnings) = table::catalog_of(doc, &tabulars, &traversal).map_err(map_err)?;
+        let (rows, warnings) = table::catalog_of(doc, &tabulars, traversal).map_err(map_err)?;
         for w in warnings {
             push_warning(w);
         }
@@ -73,6 +73,7 @@ pub fn run_table(doc: &mut Document, env: &MutationEnv<'_>) -> Result<(), CliErr
     reject_unused_flags(op, flags)?;
 
     assert_tracking_header(doc, env.track_changes)?;
+    let pre = collect_snapshots(doc, &[tabular], SnapshotMode::OnNode);
     if env.track_changes {
         ensure_tracking_changes_in_header(doc);
     }
@@ -86,8 +87,6 @@ pub fn run_table(doc: &mut Document, env: &MutationEnv<'_>) -> Result<(), CliErr
     } else {
         String::new()
     };
-    let pre = collect_snapshots(doc, &[tabular], SnapshotMode::OnNode);
-
     let result = match op {
         "set" => {
             let data = flags.str("data").ok_or_else(|| {

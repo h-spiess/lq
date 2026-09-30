@@ -495,3 +495,205 @@ fn cli_read_text_only_warns_over_10_kib_using_js_utf_16_length() {
         })
     );
 }
+
+#[test]
+fn selected_tracked_text_keeps_status_and_selector_group_order() {
+    let env = ReadEnv::new();
+    let file = env.write_lyx(
+        "selected_tracked_text.lyx",
+        r"\begin_layout Standard
+current
+\change_deleted 1 1
+old
+\change_inserted 1 2
+new
+\change_unchanged
+tail
+\end_layout
+",
+        "\\textclass article\n\\author 1 \"Alice\"\n",
+    );
+    let result = success_json(&env.run(&[
+        "read",
+        path_arg(&file),
+        "text:change(inserted), text:change(deleted)",
+    ]));
+    assert_eq!(
+        result["data"],
+        json!([
+            {"type": "text", "text": "new", "changeStatus": "inserted"},
+            {"type": "text", "text": "old", "changeStatus": "deleted"},
+        ])
+    );
+    assert_eq!(result["count"], 2);
+    let current = success_json(&env.run(&[
+        "read",
+        path_arg(&file),
+        "layout[Standard] text:change(current)",
+    ]));
+    assert_eq!(
+        current["data"],
+        json!([
+            {"type": "text", "text": "current"},
+            {"type": "text", "text": "tail"},
+        ])
+    );
+}
+
+#[test]
+fn selected_nested_blocks_keep_inherited_status_after_inner_change_ends() {
+    for (outer, inner) in [("inserted", "deleted"), ("deleted", "inserted")] {
+        let env = ReadEnv::new();
+        let body = format!(
+            "\\begin_layout Standard\n\\change_{outer} 1 1\n\
+             \\begin_inset Foot\nstatus collapsed\n\n\
+             \\begin_layout Plain Layout\ninherited\n\
+             \\change_{inner} 1 2\ninner\n\\change_unchanged\nrest\n\
+             \\end_layout\n\n\\end_inset\n\\change_unchanged\n\
+             \\end_layout\n"
+        );
+        let file = env.write_lyx(
+            "selected_nested_tracking.lyx",
+            &body,
+            "\\textclass article\n\\author 1 \"Alice\"\n",
+        );
+        for selector in ["inset[Foot]", "inset[Foot] layout[Plain Layout]"] {
+            let result = success_json(&env.run(&["read", path_arg(&file), selector]));
+            let selected = &result["data"][0];
+            let layout = if selector == "inset[Foot]" {
+                selected["children"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|child| child["tag"] == "layout")
+                    .unwrap()
+            } else {
+                selected
+            };
+            let texts: Vec<_> = layout["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|child| child["type"] == "text")
+                .cloned()
+                .collect();
+            assert_eq!(
+                texts,
+                vec![
+                    json!({"type": "text", "text": "inherited", "changeStatus": outer}),
+                    json!({"type": "text", "text": "inner", "changeStatus": inner}),
+                    json!({"type": "text", "text": "rest", "changeStatus": outer}),
+                ],
+                "{outer}: {selector}"
+            );
+        }
+    }
+}
+
+#[test]
+fn selected_tracked_text_only_keeps_inline_markers_with_or_without_count() {
+    let env = ReadEnv::new();
+    let file = env.write_lyx(
+        "selected_tracked_text_only.lyx",
+        r"\begin_layout Standard
+\change_deleted 1 1
+old
+\change_inserted 1 2
+new
+\change_unchanged
+\end_layout
+",
+        "\\textclass article\n\\author 1 \"Alice\"\n",
+    );
+    for count in [false, true] {
+        let mut args = vec![
+            "read",
+            path_arg(&file),
+            "text:change(inserted), text:change(deleted)",
+            "--text-only",
+        ];
+        if count {
+            args.push("--count");
+        }
+        let result = success_json(&env.run(&args));
+        assert_eq!(
+            result["text"],
+            "\\change_inserted{new}\n\n\\change_deleted{old}\n"
+        );
+        if count {
+            assert_eq!(result["count"], json!({"text": 2}));
+        } else {
+            assert!(result.get("count").is_none());
+        }
+    }
+    let parent =
+        success_json(&env.run(&["read", path_arg(&file), "layout[Standard]", "--text-only"]));
+    assert_eq!(
+        parent["text"],
+        "layout[Standard] \\change_deleted{old}\\change_inserted{new}\n"
+    );
+}
+
+#[test]
+fn selected_nested_text_only_keeps_prefixes_and_inherited_markers() {
+    for (outer, inner) in [("inserted", "deleted"), ("deleted", "inserted")] {
+        let env = ReadEnv::new();
+        let body = format!(
+            "\\begin_layout Standard\n\\change_{outer} 1 1\n\
+             \\begin_inset Foot\nstatus collapsed\n\n\
+             \\begin_layout Plain Layout\ninherited\n\
+             \\change_{inner} 1 2\ninner\n\\change_unchanged\nrest\n\
+             \\end_layout\n\n\\end_inset\n\\change_unchanged\n\
+             \\end_layout\n"
+        );
+        let file = env.write_lyx(
+            "selected_nested_text_only.lyx",
+            &body,
+            "\\textclass article\n\\author 1 \"Alice\"\n",
+        );
+        let markers = format!(
+            "\\change_{outer}{{inherited}}\\change_{inner}{{inner}}\\change_{outer}{{rest}}"
+        );
+        for (selector, prefix, count_label) in [
+            (
+                "inset[Foot]",
+                "inset[Foot] layout[Plain Layout]",
+                "inset[Foot]",
+            ),
+            (
+                "inset[Foot] layout[Plain Layout]",
+                "layout[Plain Layout]",
+                "layout[Plain Layout]",
+            ),
+        ] {
+            let result = success_json(&env.run(&[
+                "read",
+                path_arg(&file),
+                selector,
+                "--text-only",
+                "--count",
+            ]));
+            assert_eq!(result["text"], format!("{prefix} {markers}\n"));
+            assert_eq!(result["count"], json!({count_label: 1}));
+        }
+    }
+}
+
+#[test]
+fn text_only_property_selection_inside_tracked_region_keeps_existing_output() {
+    let env = ReadEnv::new();
+    let file = env.write_lyx(
+        "tracked_property_text_only.lyx",
+        r"\begin_layout Standard
+\change_inserted 1 1
+\emph on
+new
+\change_unchanged
+\end_layout
+",
+        "\\textclass article\n\\author 1 \"Alice\"\n",
+    );
+    let result =
+        success_json(&env.run(&["read", path_arg(&file), "property[emph]", "--text-only"]));
+    assert_eq!(result["text"], "\n");
+}

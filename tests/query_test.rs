@@ -446,6 +446,40 @@ fn query_engine_on_lyx_document() {
 }
 
 #[test]
+fn core_maintenance_nth_match_large_negative_offset_keeps_integer_solution() {
+    let ast = parse_lyx(
+        "#LyX\n\\begin_layout Standard\nOne\n\\end_layout\n\\begin_layout Standard\nTwo\n\\end_layout\n\\begin_layout Standard\nThree\n\\end_layout\n",
+    );
+    let layouts = q(&ast, "layout");
+    for (formula, expected) in [
+        ("n-2147483647", layouts.clone()),
+        ("2n-2147483647", vec![layouts[0], layouts[2]]),
+        ("2147483647n-2147483646", vec![layouts[0]]),
+    ] {
+        assert_eq!(q(&ast, &format!("layout:nth-match({formula})")), expected);
+    }
+}
+
+#[test]
+fn core_maintenance_nth_match_negative_coefficients_and_signed_boundaries() {
+    let ast = parse_lyx(
+        "#LyX\n\\begin_layout Standard\nOne\n\\end_layout\n\\begin_layout Standard\nTwo\n\\end_layout\n\\begin_layout Standard\nThree\n\\end_layout\n",
+    );
+    let layouts = q(&ast, "layout");
+    for (formula, expected) in [
+        ("-n-2147483647", vec![]),
+        ("-2n+2147483647", vec![layouts[0], layouts[2]]),
+        ("-2147483647n+1", vec![layouts[0]]),
+        ("2147483647n+1", vec![layouts[0]]),
+        ("n+2147483647", vec![]),
+        ("0n+1", vec![layouts[0]]),
+        ("0n-2147483647", vec![]),
+    ] {
+        assert_eq!(q(&ast, &format!("layout:nth-match({formula})")), expected);
+    }
+}
+
+#[test]
 fn dl115_contains_not_contains_partition_own_text_included() {
     let ast = fixture();
     let all_layouts = q(&ast, "layout");

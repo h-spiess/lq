@@ -20,6 +20,37 @@ fn code(v: &Value) -> &str {
     v["code"].as_str().unwrap_or("")
 }
 
+#[test]
+fn tracked_table_ops_snapshot_undo_restores_original_header_and_bytes() {
+    for (op, flags) in [
+        ("set", vec!["--data", "W,X\nY,Z"]),
+        ("add-row", vec!["--index", "1"]),
+        ("add-column", vec!["--index", "1"]),
+        ("delete-row", vec!["--index", "1"]),
+        ("delete-column", vec!["--index", "1"]),
+    ] {
+        let env = MutationSession::tracked("Alice");
+        let file = env.write_lyx(
+            &format!("snapshot_header_{op}.lyx"),
+            &booktabs_table(),
+            "\\textclass article\n\\tracking_changes false\n",
+        );
+        let original = fs::read(&file).unwrap();
+        let mut args = vec!["table", path_arg(&file), op];
+        args.extend(flags);
+        let result = env.run(&args);
+        assert!(result.get("code").is_none(), "{op}: {result}");
+        assert_ne!(fs::read(&file).unwrap(), original, "{op} must mutate");
+        let undone = env.run(&["undo", path_arg(&file)]);
+        assert_eq!(undone["method"], "snapshot", "{op}: {undone}");
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            original,
+            "{op} undo restores the header before author/tracking changes"
+        );
+    }
+}
+
 fn read_file(path: &Path) -> String {
     fs::read_to_string(path).unwrap()
 }
