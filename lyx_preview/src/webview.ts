@@ -67,7 +67,8 @@ export function renderWebviewHtml(options: {
       b.id = "lyx-banner";
       b.className = "banner stale";
       b.textContent = text;
-      document.body.prepend(b);
+      var controls = document.getElementById("lyx-controls");
+      if (controls) controls.after(b); else document.body.prepend(b);
     }
   }
   function openAncestorDetails(el) {
@@ -88,6 +89,13 @@ export function renderWebviewHtml(options: {
       target.scrollIntoView({ behavior: "smooth", block: "start" });
     });
   }
+  var modeSelect = document.getElementById("lyx-change-view");
+  if (modeSelect) modeSelect.addEventListener("change", function () {
+    var mode = modeSelect.value;
+    if (mode === "original" || mode === "tracked" || mode === "clean") {
+      vscode.postMessage({ type: "changeView", mode: mode });
+    }
+  });
   window.addEventListener("message", function (e) {
     var msg = e.data;
     if (!msg) return;
@@ -96,6 +104,7 @@ export function renderWebviewHtml(options: {
       (msg.mode === "original" || msg.mode === "tracked" || msg.mode === "clean")
     ) {
       document.body.setAttribute("data-mode", msg.mode);
+      if (modeSelect) modeSelect.value = msg.mode;
       return;
     }
     if (msg.type === "stale") {
@@ -197,6 +206,7 @@ export function renderWebviewHtml(options: {
     selectGestureFromGlyph = !!(el && clickHitsGlyph(ev, el));
   });
   document.addEventListener("selectionchange", function () {
+    if (document.activeElement && document.activeElement.closest("#lyx-controls")) return;
     if (Date.now() < suppressSelectUntil) return;
     var sel = window.getSelection();
     if (!sel || !sel.anchorNode) {
@@ -237,6 +247,7 @@ export function renderWebviewHtml(options: {
     var t = ev.target;
     var el = t && t.nodeType === 1 ? t : t && t.parentElement;
     if (!el || !el.closest) return;
+    if (el.closest("#lyx-controls")) return;
     var details = el.closest("details.disclose");
     if (details) {
       var sum = details.querySelector(":scope > summary");
@@ -279,6 +290,10 @@ export function renderWebviewHtml(options: {
 <title>${escapeHostText(options.title)}</title>
 <style>
 body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); background: var(--vscode-editor-background); margin: 0; padding: 1rem 1.25rem 2rem; }
+#lyx-controls { position: sticky; top: 0; z-index: 10; display: flex; justify-content: flex-end; align-items: center; gap: 0.4rem; min-height: 2rem; padding: 0.2rem 0 0.4rem; margin-bottom: 0.6rem; background: var(--vscode-editor-background); font-size: 0.85em; user-select: none; }
+#lyx-change-view { font: inherit; color: var(--vscode-dropdown-foreground, var(--vscode-foreground)); background: var(--vscode-dropdown-background, var(--vscode-editor-background)); border: 1px solid var(--vscode-dropdown-border, var(--vscode-contrastBorder, transparent)); border-radius: 3px; padding: 0.25rem 0.4rem; max-width: 100%; }
+#lyx-change-view:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+article.lyx-live [id] { scroll-margin-top: 3.5rem; }
 .banner { padding: 0.4rem 0.6rem; margin-bottom: 0.75rem; border-left: 3px solid var(--vscode-editorWarning-foreground); }
 .banner.error { border-left-color: var(--vscode-errorForeground); }
 .banner.pending { border-left-color: var(--vscode-editorInfo-foreground); }
@@ -1176,6 +1191,15 @@ body[data-mode="clean"] div.change-deleted {
 </style>
 </head>
 <body data-mode="${escapeHostText(mode)}">
+<div id="lyx-controls">
+  <label for="lyx-change-view">Changes:</label>
+  <select id="lyx-change-view" aria-label="Tracked-change view" aria-describedby="lyx-change-view-help">
+    <option value="original"${mode === "original" ? " selected" : ""}>Original</option>
+    <option value="tracked"${mode === "tracked" ? " selected" : ""}>Tracked</option>
+    <option value="clean"${mode === "clean" ? " selected" : ""}>Clean</option>
+  </select>
+  <span id="lyx-change-view-help" hidden>Original shows the document before tracked edits. Tracked shows edits with markup. Clean shows the document with tracked edits applied. This changes the display only.</span>
+</div>
 ${status}
 ${diagBlock}
 ${body}

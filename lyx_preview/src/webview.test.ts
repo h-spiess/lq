@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { runInNewContext } from "node:vm";
 import { renderWebviewHtml } from "./webview";
+import { parseChangeViewMessage } from "./changeView";
 
 function render(mode?: "original" | "tracked" | "clean"): string {
   return renderWebviewHtml({
@@ -46,6 +48,66 @@ function render(mode?: "original" | "tracked" | "clean"): string {
     scriptNonce: "test123",
   });
 }
+
+describe("direct Changes dropdown", () => {
+  function controls(mode: "original" | "tracked" | "clean" = "tracked") {
+    const html = render(mode);
+    const messages: any[] = [], attrs: any[] = [];
+    const selectEvents: Record<string, (...args: any[]) => void> = {};
+    const documentEvents: Record<string, (...args: any[]) => void> = {};
+    const windowEvents: Record<string, (...args: any[]) => void> = {};
+    const select = { value: mode as string, addEventListener: (name: string, callback: any) => { selectEvents[name] = callback; }, closest: () => ({}) };
+    const document: any = {
+      activeElement: undefined,
+      getElementById: (id: string) => id === "lyx-change-view" ? select : undefined,
+      addEventListener: (name: string, callback: any) => { documentEvents[name] = callback; },
+      body: { setAttribute: (name: string, value: string) => { attrs.push([name, value]); } },
+    };
+    const window = { addEventListener: (name: string, callback: any) => { windowEvents[name] = callback; } };
+    const code = /<script nonce="[^"]+">([\s\S]*?)<\/script>/.exec(html)![1];
+    runInNewContext(code, { document, window, acquireVsCodeApi: () => ({ postMessage: (m: any) => { messages.push(m); } }) });
+    messages.length = 0;
+    return { html, messages, attrs, select, document, selectEvents, documentEvents, windowEvents };
+  }
+
+  it("shows an accessible label and the current mode even during a repaint", () => {
+    for (const mode of ["original", "tracked", "clean"] as const) {
+      const { html } = controls(mode);
+      assert.match(html, /<label for="lyx-change-view">Changes:<\/label>/);
+      assert.match(html, /aria-describedby="lyx-change-view-help"/);
+      assert.match(html, new RegExp(`<option value="${mode}" selected>`));
+      assert.equal((html.match(/ selected>/g) ?? []).length, 1);
+    }
+  });
+
+  it("requests a valid view directly, synchronizes host changes, and rejects invalid messages", () => {
+    const ui = controls();
+    ui.select.value = "clean";
+    ui.selectEvents.change();
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages)), [{ type: "changeView", mode: "clean" }]);
+    assert.equal(parseChangeViewMessage(ui.messages[0]), "clean");
+    ui.windowEvents.message({ data: { type: "setMode", mode: "original" } });
+    assert.deepEqual(ui.attrs, [["data-mode", "original"]]);
+    assert.equal(ui.select.value, "original");
+    ui.windowEvents.message({ data: { type: "setMode", mode: "bad" } });
+    assert.equal(ui.attrs.length, 1);
+    ui.select.value = "bad";
+    ui.selectEvents.change();
+    assert.equal(ui.messages.length, 1);
+    for (const bad of [null, "clean", { type: "changeView", mode: "bad" }, { type: "setMode", mode: "clean" }]) {
+      assert.equal(parseChangeViewMessage(bad), undefined);
+    }
+  });
+
+  it("does not publish document selections from control interaction", () => {
+    const ui = controls();
+    ui.document.activeElement = ui.select;
+    ui.documentEvents.selectionchange();
+    ui.documentEvents.click({ target: { nodeType: 1, closest: (s: string) => s === "#lyx-controls" ? {} : undefined } });
+    assert.deepEqual(ui.messages, []);
+    assert.match(ui.html, /scroll-margin-top: 3.5rem/);
+  });
+});
 
 describe("renderWebviewHtml change views", () => {
   it("bakes the default Tracked mode on body", () => {

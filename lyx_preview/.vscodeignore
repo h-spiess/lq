@@ -1,14 +1,14 @@
-# What WILL be in the .vsix (everything not matched below / by .gitignore):
+# What WILL be in the .vsix (everything not matched below):
 #   package.json
 #   README.md
 #   language-configuration.json
-#   media/**          (icons: LYX_preview_S.png, L-L.svg, L-L-Y.svg)
+#   media/**          (icons: LYX_preview_S.png, L-L.svg, L-Open*.svg)
 #   out/**/*.js       (compiled extension; tests excluded below)
 #   LICENSE / CHANGELOG.md when present
 #
-# What NOT to put in the .vsix (same syntax as .gitignore).
-# vsce also respects .gitignore — and that file ignores out/ — so we must
-# re-include the compiled JS below.
+# What NOT to put in the .vsix (glob patterns).
+# vsce exclusions come from this file; a broad !out/** would also re-include
+# tests and source maps, so compiled production JS uses the default inclusion.
 
 # Large media files
 media/LYX_preview_L.png
@@ -29,7 +29,3 @@ node_modules/**
 package-lock.json
 *.vsix
 dist/**
-
-# .gitignore lists out/ — ship the compiled extension anyway
-!out/**
-out/**/*.test.js

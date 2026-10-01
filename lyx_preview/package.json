@@ -2,7 +2,7 @@
   "name": "lyx-preview",
   "displayName": "LyX Preview",
   "description": "Read-only preview of saved .lyx files.",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "publisher": "CoconutWater",
   "license": "MIT",
   "repository": {
@@ -36,6 +36,14 @@
         "configuration": "./language-configuration.json"
       }
     ],
+    "customEditors": [
+      {
+        "viewType": "lyxPreview.live",
+        "displayName": "LyX",
+        "selector": [{ "filenamePattern": "*.lyx" }],
+        "priority": "option"
+      }
+    ],
     "commands": [
       {
         "command": "lyx-preview.open",
@@ -44,6 +52,15 @@
         "icon": {
           "light": "media/L-L.svg",
           "dark": "media/L-L.svg"
+        },
+        "category": "LyX Preview"
+      },
+      {
+        "command": "lyx-preview.openInLyx",
+        "title": "Open in LyX",
+        "icon": {
+          "light": "media/L-Open.svg",
+          "dark": "media/L-Open-dark.svg"
         },
         "category": "LyX Preview"
       },
@@ -70,7 +87,6 @@
       {
         "command": "lyx-preview.changeView",
         "title": "Tracked-change view",
-        "icon": "media/L-L-Y.svg",
         "category": "LyX Preview"
       }
     ],
@@ -88,23 +104,26 @@
     "menus": {
       "editor/title": [
         {
-          "command": "lyx-preview.open",
-          "when": "resourceExtname == .lyx",
-          "group": "navigation"
-        },
-        {
-          "command": "lyx-preview.changeView",
-          "when": "activeWebviewPanelId == 'lyxPreview.live'",
-          "group": "navigation"
+          "command": "lyx-preview.openInLyx",
+          "when": "(resourceExtname == .lyx && !isInDiffEditor) || activeCustomEditorId == 'lyxPreview.live'",
+          "group": "navigation@1"
         }
       ],
       "commandPalette": [
+        {
+          "command": "lyx-preview.openInLyx",
+          "when": "resourceExtname == .lyx || activeCustomEditorId == 'lyxPreview.live'"
+        },
         {
           "command": "lyx-preview.open",
           "when": "resourceExtname == .lyx"
         },
         {
           "command": "lyx-preview.revealOutline",
+          "when": "false"
+        },
+        {
+          "command": "lyx-preview.changeView",
           "when": "false"
         },
         {
@@ -128,6 +147,12 @@
     "configuration": {
       "title": "LyX Preview",
       "properties": {
+        "lyx-preview.lyxPath": {
+          "type": "string",
+          "scope": "application",
+          "default": "",
+          "description": "Path to the LyX application to open documents in. Leave empty to find an installed LyX automatically. Accepts ~; on macOS, accepts LyX.app."
+        },
         "lyx-preview.lqPath": {
           "type": "string",
           "default": "",
@@ -150,7 +175,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint .",
-    "test": "npm run compile && node --test out/fsPath.test.js out/previewSession.test.js out/outlineProvider.test.js out/lqRunner.test.js out/lqEnsure.test.js out/webview.test.js out/liveSelection.test.js out/previewRoster.test.js",
+    "test": "npm run compile && node --test out/fsPath.test.js out/previewSession.test.js out/outlineProvider.test.js out/lqRunner.test.js out/lqEnsure.test.js out/webview.test.js out/liveSelection.test.js out/previewRoster.test.js out/previewPanels.test.js out/lyxOpen.test.js out/extensionHost.test.js",
     "vscode:prepublish": "npm run compile",
     "package": "vsce package --no-dependencies"
   },

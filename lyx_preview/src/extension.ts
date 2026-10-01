@@ -19,6 +19,9 @@ import {
   rememberOutline,
 } from "./outlineProvider";
 import { PreviewRoster } from "./previewRoster";
+import { PreviewPanels } from "./previewPanels";
+import { parseChangeViewMessage, type ChangeViewMode } from "./changeView";
+import { LyxOpener } from "./lyxOpen";
 import {
   attachApproxLines,
   attachNavigateLines,
@@ -38,7 +41,7 @@ import {
 
 const VIEW_TYPE = "lyxPreview.live";
 
-export type ChangeViewMode = "original" | "tracked" | "clean";
+export type { ChangeViewMode } from "./changeView";
 
 const roster = new PreviewRoster();
 
@@ -58,10 +61,11 @@ interface LiveSelectionHost {
 }
 
 class LivePreviewPanel {
-  private static readonly byPath = new Map<string, LivePreviewPanel>();
+  private static readonly panels = new PreviewPanels<LivePreviewPanel>();
   private readonly disposables: vscode.Disposable[] = [];
   private readonly session = new PreviewSession();
   private pending = false;
+  private disposed = false;
   private webviewReady = false;
   private abort: AbortController | undefined;
   private diskTimer: ReturnType<typeof setTimeout> | undefined;
@@ -76,21 +80,33 @@ class LivePreviewPanel {
     private readonly outlineTree: LyxOutlineTreeProvider,
     private readonly host: LiveSelectionHost,
     private readonly onChangeFocus?: (entry: LiveChangeEntry | undefined) => void,
+    token?: vscode.CancellationToken,
   ) {
     this.filePath = normalizeFsPath(document.uri.fsPath);
-    LivePreviewPanel.byPath.set(this.filePath, this);
-    roster.open(this.filePath);
-    roster.activatePreview(this.filePath);
+    if (LivePreviewPanel.panels.add(this, this.filePath)) roster.open(this.filePath);
+    if (panel.active) {
+      LivePreviewPanel.panels.activate(this);
+      roster.activatePreview(this.filePath);
+    }
+    if (document.isDirty) this.session.markStale();
+    if (token) this.disposables.push(token.onCancellationRequested(() => this.dispose()));
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
     this.panel.onDidChangeViewState((e) => {
       if (e.webviewPanel.active) {
+        LivePreviewPanel.panels.activate(this);
         roster.activatePreview(this.filePath);
         this.syncOutline();
       } else {
+        LivePreviewPanel.panels.deactivate(this);
         roster.markPreviewInactive(this.filePath);
       }
     }, null, this.disposables);
     this.panel.webview.onDidReceiveMessage((msg: unknown) => {
+      const mode = parseChangeViewMessage(msg);
+      if (mode) {
+        this.setMode(mode);
+        return;
+      }
       if (msg !== null && typeof msg === "object" && (msg as { type?: unknown }).type === "ready") {
         this.webviewReady = true;
         return;
@@ -171,22 +187,15 @@ class LivePreviewPanel {
     void this.refresh();
   }
 
-  static createOrShow(
+  static resolve(
     document: vscode.TextDocument,
+    panel: vscode.WebviewPanel,
     outlineTree: LyxOutlineTreeProvider,
     host: LiveSelectionHost,
     onChangeFocus?: (entry: LiveChangeEntry | undefined) => void,
+    token?: vscode.CancellationToken,
   ): void {
-    const existing = LivePreviewPanel.find(document.uri.fsPath);
-    if (existing) {
-      existing.panel.reveal(existing.panel.viewColumn);
-      existing.document = document;
-      roster.activatePreview(existing.filePath);
-      existing.syncOutline();
-      void existing.refresh();
-      return;
-    }
-    const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.Beside;
+    if (token?.isCancellationRequested) return;
     const roots = new Map<string, vscode.Uri>();
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
       roots.set(folder.uri.toString(), folder.uri);
@@ -203,28 +212,21 @@ class LivePreviewPanel {
       addLqCacheRoot(roots, walk);
     }
     addLqCacheRoot(roots, homedir());
-    const panel = vscode.window.createWebviewPanel(
-      VIEW_TYPE,
-      titleFor(document),
-      column,
-      {
-        enableScripts: true,
-        enableFindWidget: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [...roots.values()],
-      },
-    );
-    new LivePreviewPanel(panel, document, outlineTree, host, onChangeFocus);
+    panel.webview.options = { enableScripts: true, localResourceRoots: [...roots.values()] };
+    new LivePreviewPanel(panel, document, outlineTree, host, onChangeFocus, token);
   }
 
   static find(path: string): LivePreviewPanel | undefined {
-    const key = normalizeFsPath(path);
-    const direct = LivePreviewPanel.byPath.get(key);
-    if (direct) return direct;
-    for (const [p, panel] of LivePreviewPanel.byPath) {
-      if (sameFsPath(p, path)) return panel;
-    }
-    return undefined;
+    return LivePreviewPanel.panels.find(path);
+  }
+
+  static active(): LivePreviewPanel | undefined { return LivePreviewPanel.panels.active(); }
+
+  get documentUri(): vscode.Uri { return this.document.uri; }
+
+  static modePanel(): LivePreviewPanel | undefined {
+    const target = roster.modeTarget();
+    return LivePreviewPanel.active() ?? (target ? LivePreviewPanel.find(target) : undefined);
   }
 
   /** Scroll the preview for the file the outline is showing (focus unchanged). */
@@ -234,10 +236,8 @@ class LivePreviewPanel {
   }
 
   /** Switch the focused panel's view mode without re-running lq (DL133). */
-  static setMode(mode: ChangeViewMode): void {
-    const target = roster.modeTarget();
-    if (!target) return;
-    LivePreviewPanel.find(target)?.setMode(mode);
+  static setMode(mode: ChangeViewMode, target = LivePreviewPanel.modePanel()): void {
+    target?.setMode(mode);
   }
 
   /**
@@ -295,6 +295,7 @@ class LivePreviewPanel {
   }
 
   private async refresh(): Promise<void> {
+    if (this.disposed) return;
     const generation = this.session.nextGeneration();
     this.abort?.abort();
     const abort = new AbortController();
@@ -304,6 +305,7 @@ class LivePreviewPanel {
     const timeoutMs = vscode.workspace.getConfiguration("lyx-preview", this.document.uri).get<number>("timeoutMs") ?? 30000;
     try {
       await ensureCompanionLq(this.document.uri);
+      if (this.disposed || abort.signal.aborted) return;
       const lqPath = discoverLqBinary(this.document.uri);
       const render = await runLivePreview(lqPath, this.filePath, timeoutMs, abort.signal);
       if (abort.signal.aborted || generation !== this.session.generation) return;
@@ -370,6 +372,7 @@ class LivePreviewPanel {
   }
 
   private setMode(mode: ChangeViewMode): void {
+    if (this.disposed) return;
     this.mode = mode;
     if (this.webviewReady) {
       void this.panel.webview.postMessage({ type: "setMode", mode });
@@ -380,25 +383,32 @@ class LivePreviewPanel {
   }
 
   private dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     if (this.diskTimer) clearTimeout(this.diskTimer);
     this.abort?.abort();
     this.abort = undefined;
-    for (const [p, panel] of [...LivePreviewPanel.byPath]) {
-      if (panel === this || sameFsPath(p, this.filePath)) LivePreviewPanel.byPath.delete(p);
-    }
+    const wasActive = LivePreviewPanel.active() === this;
+    const ownedOutline = roster.showsOutline(this.filePath);
+    const lastPanel = LivePreviewPanel.panels.remove(this);
     const ed = vscode.window.activeTextEditor;
     const activeLyx = ed?.document.fileName.toLowerCase().endsWith(".lyx")
       ? ed.document.uri.fsPath
       : undefined;
-    const next = roster.close(this.filePath, activeLyx);
-    forgetOutline(this.filePath);
+    const next = lastPanel ? roster.close(this.filePath, activeLyx) : undefined;
+    if (lastPanel) forgetOutline(this.filePath);
     const rec = this.host.selection.get();
-    if (!rec || selectionBelongsToPreview(rec, this.filePath)) {
+    if (lastPanel && (!rec || selectionBelongsToPreview(rec, this.filePath))) {
       this.host.selection.clear();
       this.host.persistSelection(undefined, this.filePath);
       this.host.onSelectionChange(undefined);
     }
-    this.onChangeFocus?.(undefined);
+    if (wasActive || ownedOutline) this.onChangeFocus?.(undefined);
+    if (!lastPanel) {
+      if (roster.showsOutline(this.filePath)) LivePreviewPanel.find(this.filePath)?.syncOutline();
+      for (const d of this.disposables) d.dispose();
+      return;
+    }
     if (next) {
       const other = LivePreviewPanel.find(next.path);
       if (other) other.syncOutline();
@@ -429,6 +439,15 @@ function rewriteLocalImages(html: string, webview: vscode.Webview): string {
 function titleFor(document: vscode.TextDocument): string {
   const name = document.fileName.split(/[/\\]/).pop() ?? document.fileName;
   return `LyX Preview: ${name}`;
+}
+
+/** Prefer the invoking editor's resource; never use the outline's sticky focus. */
+function commandDocumentUri(uri?: vscode.Uri): vscode.Uri | undefined {
+  if (uri instanceof vscode.Uri) return uri;
+  const input = vscode.window.tabGroups.activeTabGroup.activeTab?.input;
+  if (input instanceof vscode.TabInputText) return input.uri;
+  if (input instanceof vscode.TabInputCustom && input.viewType === VIEW_TYPE) return input.uri;
+  return LivePreviewPanel.active()?.documentUri;
 }
 
 function refreshOutlineForPath(
@@ -496,6 +515,19 @@ export function activate(context: vscode.ExtensionContext): void {
     selectStatus.show();
   };
   const host: LiveSelectionHost = { selection, persistSelection, onSelectionChange };
+  const lyxOpener = new LyxOpener({
+    readSetting: () => vscode.workspace.getConfiguration("lyx-preview").get<string>("lyxPath") ?? "",
+    pickExecutable: async () => {
+      const picked = await vscode.window.showOpenDialog({
+        title: "Select the LyX application", openLabel: "Use LyX",
+        canSelectMany: false, canSelectFiles: true, canSelectFolders: process.platform === "darwin",
+        ...(process.platform === "win32" ? { filters: { "LyX executable": ["exe"] } } : {}),
+      });
+      return picked?.[0]?.fsPath;
+    },
+    rememberExecutable: (path) => vscode.workspace.getConfiguration("lyx-preview")
+      .update("lyxPath", path, vscode.ConfigurationTarget.Global),
+  });
   const onLiveChangeFocus = (entry: LiveChangeEntry | undefined): void => {
     if (!entry) {
       changeStatus.hide();
@@ -516,18 +548,40 @@ export function activate(context: vscode.ExtensionContext): void {
     treeView,
     changeStatus,
     selectStatus,
+    vscode.window.registerCustomEditorProvider(VIEW_TYPE, {
+      resolveCustomTextEditor: (document, panel, token) => {
+        LivePreviewPanel.resolve(document, panel, outlineTree, host, onLiveChangeFocus, token);
+      },
+    }, { webviewOptions: { retainContextWhenHidden: true, enableFindWidget: true } }),
     vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("lyx-preview.lyxPath")) lyxOpener.invalidate();
       if (e.affectsConfiguration("lyx-preview.lqPath")) {
-        void ensureCompanionLq();
+        void ensureCompanionLq().catch(() => {});
       }
     }),
-    vscode.commands.registerCommand("lyx-preview.open", () => {
-      const editor = vscode.window.activeTextEditor;
-      if (!editor || !editor.document.fileName.toLowerCase().endsWith(".lyx")) {
+    vscode.commands.registerCommand("lyx-preview.open", async (uri?: vscode.Uri) => {
+      const target = commandDocumentUri(uri);
+      if (!target || !target.fsPath.toLowerCase().endsWith(".lyx")) {
         void vscode.window.showWarningMessage("Open a .lyx document before opening LyX Preview.");
         return;
       }
-      LivePreviewPanel.createOrShow(editor.document, outlineTree, host, onLiveChangeFocus);
+      await vscode.commands.executeCommand("vscode.openWith", target, VIEW_TYPE, { viewColumn: vscode.ViewColumn.Active });
+    }),
+    vscode.commands.registerCommand("lyx-preview.openInLyx", async (uri?: vscode.Uri) => {
+      try {
+        const target = commandDocumentUri(uri);
+        if (!target) {
+          void vscode.window.showWarningMessage("Open a .lyx document or LyX Preview before opening it in LyX.");
+          return;
+        }
+        if (target.scheme !== "file" || vscode.env.uiKind !== vscode.UIKind.Desktop || Boolean(vscode.env.remoteName)) {
+          throw new Error("Open in LyX requires desktop VS Code with a local document. Save a local .lyx copy to use this action.");
+        }
+        const document = await vscode.workspace.openTextDocument(target);
+        await lyxOpener.open(document);
+      } catch (error) {
+        void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+      }
     }),
     vscode.commands.registerCommand("lyx-preview.viewOriginal", () => {
       LivePreviewPanel.setMode("original");
@@ -539,9 +593,8 @@ export function activate(context: vscode.ExtensionContext): void {
       LivePreviewPanel.setMode("clean");
     }),
     vscode.commands.registerCommand("lyx-preview.changeView", async () => {
-      // J-E fallback: the submenu icon does not render in this VS Code
-      // build's editor/title, so the Preview panel title bar carries a plain
-      // command button (icon = L-L-Y.svg) that opens this quick pick.
+      // Compatibility for existing shortcuts; the visible control is inside Preview.
+      const target = LivePreviewPanel.modePanel();
       const picked = await vscode.window.showQuickPick(
         [
           { label: "Original", description: "Show the document before the changes", mode: "original" },
@@ -550,7 +603,7 @@ export function activate(context: vscode.ExtensionContext): void {
         ] as (vscode.QuickPickItem & { mode: ChangeViewMode })[],
         { placeHolder: "Tracked-change view" },
       );
-      if (picked) LivePreviewPanel.setMode(picked.mode);
+      if (picked) LivePreviewPanel.setMode(picked.mode, target);
     }),
     vscode.commands.registerCommand(
       "lyx-preview.revealOutline",
@@ -575,7 +628,8 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   refreshTreeForDoc(vscode.window.activeTextEditor?.document);
-  void ensureCompanionLq();
+  // Missing lq is shown when Preview renders; external Open in LyX works independently.
+  void ensureCompanionLq().catch(() => {});
 }
 
 export function deactivate(): void {

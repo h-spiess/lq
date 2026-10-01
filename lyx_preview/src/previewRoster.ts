@@ -1,4 +1,4 @@
-/** Open Preview panels and which document LyX Outline is showing. */
+/** Open Preview files and which document LyX Outline is showing. */
 
 import { normalizeFsPath, sameFsPath } from "./fsPath";
 
@@ -10,7 +10,8 @@ export interface OutlineFocus {
 }
 
 /**
- * One preview per file, plus outline focus (last preview or `.lyx` you clicked).
+ * One roster entry per file; PreviewPanels tracks the split panels for that file.
+ * Outline focus follows the last Preview or `.lyx` editor you clicked.
  * Outline clicks do not count as switching away.
  */
 export class PreviewRoster {
