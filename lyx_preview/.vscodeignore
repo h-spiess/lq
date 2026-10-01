@@ -10,8 +10,14 @@
 # vsce exclusions come from this file; a broad !out/** would also re-include
 # tests and source maps, so compiled production JS uses the default inclusion.
 
-# Large media files
+# Unused media (kept as design sources)
+media/L-L-Y.svg
+media/L-S.png
 media/LYX_preview_L.png
+media/X-L.svg
+media/X-S.png
+media/Y-L.svg
+media/Y-S.png
 
 # Sources & tooling (runtime loads out/extension.js, not TypeScript)
 src/**
