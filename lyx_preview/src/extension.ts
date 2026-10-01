@@ -541,7 +541,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("lyx-preview.changeView", async () => {
       // J-E fallback: the submenu icon does not render in this VS Code
       // build's editor/title, so the Preview panel title bar carries a plain
-      // command button (icon = lyx-l-yellow.svg) that opens this quick pick.
+      // command button (icon = L-L-Y.svg) that opens this quick pick.
       const picked = await vscode.window.showQuickPick(
         [
           { label: "Original", description: "Show the document before the changes", mode: "original" },

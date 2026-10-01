@@ -10,7 +10,7 @@
     "url": "https://github.com/naivej/lq.git"
   },
   "homepage": "https://github.com/naivej/lq/tree/main/lyx_preview",
-  "icon": "media/icon-vsd.png",
+  "icon": "media/LYX_preview_S.png",
   "engines": {
     "vscode": "^1.96.0"
   },
@@ -42,8 +42,8 @@
         "title": "Open LyX Preview",
         "shortTitle": "LyX Preview",
         "icon": {
-          "light": "media/lyx-l.svg",
-          "dark": "media/lyx-l.svg"
+          "light": "media/L-L.svg",
+          "dark": "media/L-L.svg"
         },
         "category": "LyX Preview"
       },
@@ -70,7 +70,7 @@
       {
         "command": "lyx-preview.changeView",
         "title": "Tracked-change view",
-        "icon": "media/lyx-l-yellow.svg",
+        "icon": "media/L-L-Y.svg",
         "category": "LyX Preview"
       }
     ],
@@ -81,7 +81,7 @@
           "name": "LyX Outline",
           "when": "lyxPreview.hasOutline || resourceExtname == .lyx",
           "contextualTitle": "LyX Outline",
-          "icon": "media/lyx-l.svg"
+          "icon": "media/L-L.svg"
         }
       ]
     },

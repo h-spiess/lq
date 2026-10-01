@@ -2,7 +2,7 @@
 #   package.json
 #   README.md
 #   language-configuration.json
-#   media/**          (icons: icon-vsd.png, lyx-l.svg, lyx-l-yellow.svg)
+#   media/**          (icons: LYX_preview_S.png, L-L.svg, L-L-Y.svg)
 #   out/**/*.js       (compiled extension; tests excluded below)
 #   LICENSE / CHANGELOG.md when present
 #
@@ -11,7 +11,7 @@
 # re-include the compiled JS below.
 
 # Large media files
-media/icon-vsd-h.png
+media/LYX_preview_L.png
 
 # Sources & tooling (runtime loads out/extension.js, not TypeScript)
 src/**
