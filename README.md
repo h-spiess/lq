@@ -1,11 +1,10 @@
-<h1 align="center">
-  <picture style="display:inline-block; margin-right:12px;">
+<p align="center">
+  <picture>
     <source media="(prefers-color-scheme: dark)" srcset="brand/icon.svg">
     <source media="(prefers-color-scheme: light)" srcset="brand/icon-light.svg">
-    <img src="brand/icon-light.svg" alt="lq - a CLI for LyX" width="48" height="48" style="vertical-align:-10px; display:inline-block;">
+    <img src="brand/icon-light.svg" alt="lq logo" width="80" height="80">
   </picture>
-  lq - a CLI for LyX
-</h1>
+</p>
 
 `lq` is a standalone CLI designed to parse, query, and mutate LyX documents (`.lyx` files).
 
@@ -23,8 +22,8 @@
 - `lq` mutates `.lyx` files in the same way as LyX (verified against the LyX source code).
 - CLI and skill designed for AI agents.
   - The skill also covers how to use headless LyX to create, import, and export LyX documents, allowing users to work with LaTeX (and other supported formats) using LyX as a translator.
-- View agent changes in track mode in
-  - LyX auto refreshed through [LyXServer](https://wiki.lyx.org/LyX/LyXServer).
+- View the agent's tracked changes in
+  - LyX auto refreshed through [LyXServer](https://wiki.lyx.org/LyX/LyXServer),
   - VS Code through the [LyX Preview extension](lyx_preview/README.md).
 
 ## Compatibility
