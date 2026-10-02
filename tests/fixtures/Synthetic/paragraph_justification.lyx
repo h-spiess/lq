@@ -1,0 +1,50 @@
+#LyX 2.5 created this file.
+\lyxformat 643
+\begin_document
+\begin_header
+\textclass article
+\language english
+\inputencoding utf8
+\justification default
+\paragraph_separation skip
+\paragraph_indentation default
+\end_header
+\begin_body
+\begin_layout Section
+Paragraph alignment
+\end_layout
+\begin_layout Standard
+Default alignment: this ordinary paragraph contains enough words to wrap across several lines in a narrow work area. Its full lines should stretch to both edges, while the final line stays at the start edge. This paragraph has no explicit alignment property.
+\end_layout
+\begin_layout Standard
+\align left
+Left alignment: this paragraph should keep a ragged right edge even when the document enables justification. It contains enough ordinary words to wrap across several lines, so the difference from default alignment is easy to see.
+\end_layout
+\begin_layout Standard
+\align center
+Centered alignment: this paragraph should remain centered when it wraps across several lines. Default justification must preserve this explicit choice.
+\end_layout
+\begin_layout Standard
+\align right
+Right alignment: this paragraph should remain against the right edge when it wraps across several lines. Default justification must preserve this explicit choice.
+\end_layout
+\begin_layout Standard
+\align block
+Explicit justified alignment: this paragraph contains enough words to wrap across several lines. It should behave like the default paragraph, including an unstretched final line. Turning off document screen justification should stop stretching both paragraphs.
+\end_layout
+\begin_layout Standard
+Line break control: these ordinary words should stretch on wrapped lines, with a short line before the manual break.
+\begin_inset Newline newline
+\end_inset
+The words after the manual break form a new line whose final line should remain unstretched.
+\end_layout
+\begin_layout Standard
+Display control: this ordinary paragraph introduces a displayed formula.
+\begin_inset Formula \[
+a=b
+\]
+\end_inset
+The text after the formula stays in the same paragraph.
+\end_layout
+\end_body
+\end_document

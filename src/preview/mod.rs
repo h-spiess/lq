@@ -19,8 +19,9 @@ use crate::bind::{
 use crate::cache::hash_file;
 use crate::latex_math::MathMacroMap;
 use crate::schema::{
-    LayoutHtml, LayoutSearchOptions, extract_document_layout_context, find_layout_file,
-    get_layout_html_for_class, get_lyx_user_layouts_dir, resolve_layout_search_paths,
+    LayoutAlignment, LayoutHtml, LayoutSearchOptions, extract_document_layout_context,
+    find_layout_file, get_layout_render_metadata, get_lyx_user_layouts_dir,
+    resolve_layout_search_paths,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -641,6 +642,8 @@ pub fn render_live_html(
         biboptions: String::new(),
         outline: Vec::new(),
         layout_html: Some(loaded_layouts.map),
+        layout_alignments: loaded_layouts.alignments,
+        justify: mapping::document_justified(ast),
         shortcuts: Some(shortcuts),
         math_macros: index::extract_math_macros(ast),
         nomencl: Vec::new(),
@@ -843,6 +846,8 @@ pub(crate) struct RenderCtx<'a> {
     pub biboptions: String,
     pub outline: Vec<LiveOutlineEntry>,
     pub layout_html: Option<HashMap<String, LayoutHtml>>,
+    pub layout_alignments: HashMap<String, LayoutAlignment>,
+    pub justify: bool,
     pub shortcuts: Option<ShortcutMap>,
     pub math_macros: Option<MathMacroMap>,
     pub nomencl: Vec<NomenclEntry>,
@@ -932,6 +937,7 @@ pub(crate) fn find_body(ast: &Document) -> Vec<NodeId> {
 #[derive(Debug)]
 struct LoadedLayoutHtml {
     map: HashMap<String, LayoutHtml>,
+    alignments: HashMap<String, LayoutAlignment>,
     warnings: Vec<String>,
     diagnostics: Vec<LiveDiagnostic>,
 }
@@ -980,8 +986,10 @@ Install LyX or set --layouts-dir / config layoutsDir."
         Some(tc) => tc,
     };
     let modules: Vec<&str> = ctx.modules.iter().map(String::as_str).collect();
+    let metadata = get_layout_render_metadata(load_name, search_paths, &modules, Some(&ctx.local));
     Ok(LoadedLayoutHtml {
-        map: get_layout_html_for_class(load_name, search_paths, &modules, Some(&ctx.local)),
+        map: metadata.html,
+        alignments: metadata.alignments,
         warnings,
         diagnostics,
     })

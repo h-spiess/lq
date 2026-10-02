@@ -1,4 +1,4 @@
-# Automatic GitHub Release for lq binaries (DL155 names, Cargo 0.8.0).
+# Automatic GitHub Release for lq binaries (DL155 names).
 # Trigger: push a version tag (v0.8.0, …).
 # Publishes stable-named assets + SHA256SUMS to that tag's Release.
 
@@ -78,6 +78,34 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract release notes
+        shell: bash
+        run: |
+          awk -v version="${GITHUB_REF_NAME#v}" '
+            { sub(/\r$/, "") }
+            /^##[[:space:]]+/ {
+              if (found) exit
+              title = $0
+              sub(/^##[[:space:]]+/, "", title)
+              sub(/[[:space:]].*$/, "", title)
+              if (title == version) found = 1
+              next
+            }
+            found { print }
+            END {
+              if (!found) {
+                print "No changelog entry for " version > "/dev/stderr"
+                exit 1
+              }
+            }
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "Changelog entry is empty for $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -92,6 +120,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          body_path: release-notes.md
           files: |
             release/lq_win64.exe
             release/lq_win_arm64.exe

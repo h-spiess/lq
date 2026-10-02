@@ -2,7 +2,7 @@
 
 use super::{FlowItem, RenderCtx, insets, mapping};
 use crate::ast::{Document, NodeId, NodeKind};
-use crate::schema::LayoutHtml;
+use crate::schema::{LayoutAlignment, LayoutHtml};
 use crate::text_utils::{
     TextRegion, TraversalState, advance_traversal_state, create_traversal_state,
     enter_traversal_state, is_invisible_inset, traversal_region,
@@ -465,7 +465,7 @@ pub(crate) fn render_flow_items(
                     format!(
                         "<section><{tag}{}{}>{num_html}{}</{tag}>",
                         mapping::mapping_attrs(&id),
-                        paragraph_style_attr(ctx.doc(), item.node, ctx.par_indent),
+                        paragraph_style_attr(ctx, item.node, &item.layout),
                         insets::render_layout_inline(item.node, ctx, false, outer_state)
                     )
                 });
@@ -533,7 +533,7 @@ pub(crate) fn render_flow_items(
                 mapping::layout_slug(&item.layout),
                 deleted_class,
                 mapping::mapping_attrs(&id),
-                paragraph_style_attr(ctx.doc(), item.node, ctx.par_indent)
+                paragraph_style_attr(ctx, item.node, &item.layout)
             )
         }));
         i += 1;
@@ -829,7 +829,7 @@ fn render_list(
                         "<dt{}>{label}</dt><dd{}{}>{rest}",
                         mapping::mapping_attrs(&dt_id),
                         mapping::mapping_attrs(&dd_id),
-                        paragraph_style_attr(ctx.doc(), item.node, ctx.par_indent)
+                        paragraph_style_attr(ctx, item.node, &item.layout)
                     )
                 }));
                 i += 1;
@@ -853,7 +853,7 @@ fn render_list(
                     format!(
                         "<{item_tag}{}{}>{}",
                         mapping::mapping_attrs(&id),
-                        paragraph_style_attr(ctx.doc(), item.node, ctx.par_indent),
+                        paragraph_style_attr(ctx, item.node, &item.layout),
                         insets::render_layout_inline(item.node, ctx, false, None)
                     )
                 }));
@@ -916,7 +916,7 @@ fn render_env(items: &[FlowItem], start: usize, ctx: &mut RenderCtx<'_>) -> (Str
             format!(
                 "<{item}{}{}>{}</{item}>",
                 mapping::mapping_attrs(&id),
-                paragraph_style_attr(ctx.doc(), items[i].node, ctx.par_indent),
+                paragraph_style_attr(ctx, items[i].node, &items[i].layout),
                 insets::render_layout_inline(items[i].node, ctx, false, None)
             )
         }));
@@ -1081,7 +1081,8 @@ fn render_bib_env(items: &[FlowItem], start: usize, ctx: &mut RenderCtx<'_>) -> 
     (html, i)
 }
 
-fn paragraph_style_attr(ast: &Document, node: NodeId, par_indent: bool) -> String {
+fn paragraph_style_attr(ctx: &RenderCtx<'_>, node: NodeId, layout: &str) -> String {
+    let ast = ctx.doc();
     let mut align = None;
     let mut noindent = false;
     let mut leftindent = None;
@@ -1104,15 +1105,47 @@ fn paragraph_style_attr(ast: &Document, node: NodeId, par_indent: bool) -> Strin
         }
     }
     let mut styles = Vec::new();
-    match align.as_deref() {
-        Some("center") => styles.push("text-align: center".into()),
-        Some("left") => styles.push("text-align: left".into()),
-        Some("right") => styles.push("text-align: right".into()),
-        Some("block") => styles.push("text-align: justify".into()),
-        _ => {}
+    let rtl = mapping::paragraph_is_rtl(ast, node);
+    let explicit = align
+        .as_deref()
+        .and_then(LayoutAlignment::parse)
+        .filter(|a| *a != LayoutAlignment::Layout);
+    let default = ctx
+        .layout_alignments
+        .get(layout)
+        .copied()
+        // The existing article fallback can have no installed class metadata.
+        .or_else(|| (layout == "Standard").then_some(LayoutAlignment::Block));
+    let effective = explicit.or(default).map(|a| {
+        if explicit.is_none() && rtl {
+            match a {
+                LayoutAlignment::Left => LayoutAlignment::Right,
+                LayoutAlignment::Right => LayoutAlignment::Left,
+                other => other,
+            }
+        } else {
+            a
+        }
+    });
+    let css_alignment = match effective {
+        Some(LayoutAlignment::Block) if ctx.justify => Some("justify"),
+        Some(LayoutAlignment::Block) if rtl => Some("right"),
+        Some(LayoutAlignment::Block | LayoutAlignment::Left) => Some("left"),
+        Some(LayoutAlignment::Right) => Some("right"),
+        Some(LayoutAlignment::Center) => Some("center"),
+        _ => None,
+    };
+    if let Some(value) = css_alignment {
+        styles.push(format!("text-align: {value}"));
     }
-    let center_or_right = matches!(align.as_deref(), Some("center" | "right"));
-    if noindent || (par_indent && center_or_right) {
+    if rtl {
+        styles.push("direction: rtl".into());
+    }
+    let center_or_right = matches!(
+        effective,
+        Some(LayoutAlignment::Center | LayoutAlignment::Right)
+    );
+    if noindent || (ctx.par_indent && center_or_right) {
         styles.push("text-indent: 0".into());
     }
     if let Some(len) = leftindent

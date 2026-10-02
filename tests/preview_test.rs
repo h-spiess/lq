@@ -70,6 +70,390 @@ fn mini_lyx(header: &str, body: &str) -> String {
     )
 }
 
+/// 063: a paragraph without an explicit alignment uses its class default.
+#[test]
+fn live_renderer_default_paragraph_justification() {
+    let work = WorkDir::new();
+    fs::write(
+        work.path().join("article.layout"),
+        "Style Standard\n  Align Block\nEnd\n",
+    )
+    .unwrap();
+    let text = mini_lyx(
+        "\\textclass article\n\\language english\n",
+        "\\begin_layout Standard\nDefault wrapping paragraph with enough ordinary words to fill several lines.\n\\end_layout\n",
+    );
+    let ast = parse(&text, false).unwrap();
+    let result = render_live_html(
+        &ast,
+        LiveRenderOptions {
+            layouts_dir: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let at = result.html.find("Default wrapping paragraph").unwrap();
+    let start = result.html[..at].rfind("<div").unwrap();
+    assert!(
+        result.html[start..at].contains("text-align: justify"),
+        "Default Standard paragraph must be justified: {}",
+        &result.html[start..at]
+    );
+}
+
+fn alignment_html(header: &str, body: &str, layouts: &str) -> String {
+    let work = WorkDir::new();
+    fs::write(work.path().join("article.layout"), layouts).unwrap();
+    let text = mini_lyx(&format!("\\textclass article\n{header}"), body);
+    let ast = parse(&text, false).unwrap();
+    assert_eq!(lq::serialize(&ast), text, "paragraph properties round-trip");
+    render_live_html(
+        &ast,
+        LiveRenderOptions {
+            layouts_dir: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .html
+}
+
+fn paragraph_opening<'a>(html: &'a str, phrase: &str) -> &'a str {
+    let at = html
+        .find(phrase)
+        .unwrap_or_else(|| panic!("missing {phrase}"));
+    let start = html[..at].rfind("<div").expect("paragraph wrapper");
+    let end = html[start..].find('>').unwrap() + start + 1;
+    &html[start..end]
+}
+
+#[test]
+fn live_renderer_justification_flags_and_explicit_alignment() {
+    for justification in [None, Some("default"), Some("true"), Some("false")] {
+        for alignment in [
+            None,
+            Some("default"),
+            Some("block"),
+            Some("left"),
+            Some("center"),
+            Some("right"),
+        ] {
+            let header = justification
+                .map(|v| format!("\\justification {v}\n"))
+                .unwrap_or_default();
+            let property = alignment
+                .map(|v| format!("\\align {v}\n"))
+                .unwrap_or_default();
+            let html = alignment_html(
+                &header,
+                &format!(
+                    "\\begin_layout Standard\n{property}\\noindent\n\\leftindent 2em\n\\paragraph_spacing single\nAlignment control paragraph.\n\\end_layout\n"
+                ),
+                "Style Standard\nAlign Block\nEnd\n",
+            );
+            let expected = match alignment {
+                Some("left" | "center" | "right") => alignment.unwrap(),
+                _ if justification == Some("false") => "left",
+                _ => "justify",
+            };
+            let wrapper = paragraph_opening(&html, "Alignment control paragraph.");
+            assert!(
+                wrapper.contains(&format!("text-align: {expected}")),
+                "{justification:?}/{alignment:?}: {wrapper}"
+            );
+            for style in ["text-indent: 0", "padding-left: 2em", "line-height: 1"] {
+                assert!(wrapper.contains(style), "{wrapper} lost {style}");
+            }
+        }
+    }
+}
+
+#[test]
+fn live_renderer_explicit_block_alignment_control() {
+    let html = alignment_html(
+        "\\justification true\n",
+        "\\begin_layout Standard\n\\align block\nExplicit justified control.\n\\end_layout\n",
+        "Style Standard\nAlign Left\nEnd\n",
+    );
+    assert!(
+        paragraph_opening(&html, "Explicit justified control.").contains("text-align: justify")
+    );
+}
+
+#[test]
+fn live_renderer_class_alignment_and_rtl_defaults() {
+    let layouts = "Style Standard\nAlign Left\nEnd\n";
+    for (header, property, expected, rtl) in [
+        ("\\language english\n", "", "left", false),
+        ("\\language hebrew\n", "", "right", true),
+        ("\\language hebrew\n", "\\align left\n", "left", true),
+        ("\\language hebrew\n", "\\align right\n", "right", true),
+        ("\\language english\n", "\\lang hebrew\n", "right", true),
+        ("\\language hebrew\n", "\\lang english\n", "left", false),
+    ] {
+        let html = alignment_html(
+            header,
+            &format!("\\begin_layout Standard\n{property}Direction control.\n\\end_layout\n"),
+            layouts,
+        );
+        let wrapper = paragraph_opening(&html, "Direction control.");
+        assert!(
+            wrapper.contains(&format!("text-align: {expected}")),
+            "{header}/{property}: {wrapper}"
+        );
+        assert_eq!(wrapper.contains("direction: rtl"), rtl, "{wrapper}");
+    }
+    let html = alignment_html(
+        "\\language hebrew\n\\justification false\n",
+        "\\begin_layout Standard\n\\align block\nDisabled RTL block.\n\\end_layout\n",
+        layouts,
+    );
+    assert!(paragraph_opening(&html, "Disabled RTL block.").contains("text-align: right"));
+}
+
+#[test]
+fn live_renderer_alignment_from_includes_modules_and_local_layouts() {
+    let work = WorkDir::new();
+    fs::write(
+        work.path().join("base.inc"),
+        "Style Standard\nAlign Block\nEnd\nStyle Side\nAlign Right\nEnd\nStyle Bare\nEnd\n",
+    )
+    .unwrap();
+    fs::write(
+        work.path().join("article.layout"),
+        "Input base.inc\nStyle Standard\nAlign Left\nEnd\nStyle Copied\nCopyStyle Side\nEnd\n",
+    )
+    .unwrap();
+    fs::write(
+        work.path().join("align.module"),
+        "Style Standard\nAlign Center\nEnd\n",
+    )
+    .unwrap();
+    let body = "\\begin_layout Standard\nClass default.\n\\end_layout\n\\begin_layout Copied\nInherited default.\n\\end_layout\n\\begin_layout Bare\nConstructor default.\n\\end_layout\n";
+    for (header, expected) in [
+        ("\\textclass article\n", "left"),
+        (
+            "\\textclass article\n\\begin_modules\nalign\n\\end_modules\n",
+            "center",
+        ),
+        (
+            "\\textclass article\n\\begin_modules\nalign\n\\end_modules\n\\begin_forced_local_layout\nStyle Standard\nAlign Right\nEnd\n\\end_forced_local_layout\n",
+            "right",
+        ),
+        (
+            "\\textclass article\n\\begin_modules\nalign\n\\end_modules\n\\begin_forced_local_layout\nStyle Standard\nAlign Right\nEnd\n\\end_forced_local_layout\n\\begin_local_layout\nStyle Standard\nAlign Block\nEnd\n\\end_local_layout\n",
+            "justify",
+        ),
+        ("\\textclass missing\n", "left"),
+    ] {
+        let ast = parse(&mini_lyx(header, body), false).unwrap();
+        let html = render_live_html(
+            &ast,
+            LiveRenderOptions {
+                layouts_dir: Some(work.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .html;
+        assert!(
+            paragraph_opening(&html, "Class default.").contains(&format!("text-align: {expected}")),
+            "{header}: {html}"
+        );
+        assert!(paragraph_opening(&html, "Inherited default.").contains("text-align: right"));
+        assert!(paragraph_opening(&html, "Constructor default.").contains("text-align: justify"));
+    }
+    let schema =
+        lq::get_schema_for_class("article", &[work.path().to_path_buf()], &[], None).unwrap();
+    let value = serde_json::to_value(schema).unwrap();
+    let mut keys: Vec<_> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "documentLayouts",
+            "headingHierarchy",
+            "inlineProperties",
+            "insetLayouts",
+            "insets",
+            "textclass"
+        ]
+    );
+}
+
+#[test]
+fn live_renderer_included_paragraphs_keep_master_alignment_settings() {
+    let work = WorkDir::new();
+    fs::write(
+        work.path().join("article.layout"),
+        "Style Standard\nAlign Block\nEnd\n",
+    )
+    .unwrap();
+    for (parent_setting, child_setting, expected) in
+        [("true", "false", "justify"), ("false", "true", "left")]
+    {
+        let child = mini_lyx(
+            &format!("\\textclass article\n\\justification {child_setting}\n"),
+            "\\begin_layout Standard\nIncluded paragraph.\n\\end_layout\n",
+        );
+        let parent = mini_lyx(
+            &format!("\\textclass article\n\\justification {parent_setting}\n"),
+            "\\begin_layout Standard\nParent before include.\n\\end_layout\n\\begin_layout Standard\n\\begin_inset CommandInset include\nLatexCommand input\nfilename \"child.lyx\"\n\\end_inset\n\\end_layout\n\\begin_layout Standard\nParent after include.\n\\end_layout\n",
+        );
+        let child_path = work.path().join("child.lyx");
+        let parent_path = work.path().join("parent.lyx");
+        fs::write(&child_path, &child).unwrap();
+        fs::write(&parent_path, &parent).unwrap();
+        let result = render_live_html(
+            &parse(&parent, false).unwrap(),
+            LiveRenderOptions {
+                layouts_dir: Some(work.path().to_path_buf()),
+                file_path: Some(parent_path.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for phrase in [
+            "Parent before include.",
+            "Included paragraph.",
+            "Parent after include.",
+        ] {
+            assert!(
+                paragraph_opening(&result.html, phrase)
+                    .contains(&format!("text-align: {expected}")),
+                "{parent_setting}/{child_setting}: {}",
+                result.html
+            );
+        }
+        let id = closest_data_ref(&result.html, "Included paragraph.");
+        let token = result.tokens.iter().find(|token| token.id == id).unwrap();
+        assert!(token.bundle.file.as_ref().unwrap().ends_with("child.lyx"));
+        assert_eq!(
+            token.bundle.disk_hash.as_deref(),
+            Some(hash_text(&child).as_str())
+        );
+        assert_eq!(fs::read_to_string(parent_path).unwrap(), parent);
+        assert_eq!(fs::read_to_string(child_path).unwrap(), child);
+    }
+}
+
+#[test]
+fn live_renderer_copy_style_replaces_prior_alignment() {
+    let html = alignment_html(
+        "",
+        "\\begin_layout LateCopy\nLate copy.\n\\end_layout\n\\begin_layout OverlayCopy\nOverlay copy.\n\\end_layout\n\\begin_layout Invalid\nUnknown alignment.\n\\end_layout\n",
+        "Style \"Right Side\"\nAlign Right\nEnd\nStyle LateCopy\nAlign Left\nCopyStyle \"Right Side\"\nEnd\nStyle OverlayCopy\nAlign Left\nEnd\nStyle OverlayCopy\nCopyStyle \"Right Side\"\nEnd\nStyle Invalid\nAlign Center\nAlign unknown\nEnd\n",
+    );
+    for phrase in ["Late copy.", "Overlay copy."] {
+        assert!(paragraph_opening(&html, phrase).contains("text-align: right"));
+    }
+    assert!(paragraph_opening(&html, "Unknown alignment.").contains("text-align: center"));
+}
+
+#[test]
+fn live_renderer_copy_style_captures_alignment_before_later_overrides() {
+    let work = WorkDir::new();
+    fs::write(
+        work.path().join("article.layout"),
+        "Style Standard\nAlign Block\nEnd\nStyle Copied\nCopyStyle Standard\nEnd\n",
+    )
+    .unwrap();
+    fs::write(
+        work.path().join("later.module"),
+        "Style Standard\nAlign Left\nEnd\n",
+    )
+    .unwrap();
+    let text = mini_lyx(
+        "\\textclass article\n\\begin_modules\nlater\n\\end_modules\n",
+        "\\begin_layout Standard\nUpdated original.\n\\end_layout\n\\begin_layout Copied\nEarlier copy.\n\\end_layout\n",
+    );
+    let html = render_live_html(
+        &parse(&text, false).unwrap(),
+        LiveRenderOptions {
+            layouts_dir: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .html;
+    assert!(paragraph_opening(&html, "Updated original.").contains("text-align: left"));
+    assert!(
+        paragraph_opening(&html, "Earlier copy.").contains("text-align: justify"),
+        "CopyStyle captures the existing layout, not its future overrides: {html}"
+    );
+}
+
+#[test]
+fn live_renderer_alignment_leaves_plain_inset_paragraphs_to_their_owner() {
+    let html = alignment_html(
+        "",
+        "\\begin_layout Standard\n\\align center\nCentered host.\n\\begin_inset Foot\nstatus open\n\\begin_layout Plain Layout\nFootnote body.\n\\end_layout\n\\end_inset\n\\begin_inset Note Note\nstatus open\n\\begin_layout Plain Layout\nNote body.\n\\end_layout\n\\end_inset\n\\end_layout\n",
+        "Style Standard\nAlign Block\nEnd\n",
+    );
+    assert!(paragraph_opening(&html, "Centered host.").contains("text-align: center"));
+    for phrase in ["Footnote body.", "Note body."] {
+        let wrapper = paragraph_opening(&html, phrase);
+        assert!(wrapper.contains("plain_layout"));
+        assert!(
+            !wrapper.contains("text-align"),
+            "inset owner must retain its alignment: {wrapper}"
+        );
+    }
+}
+
+#[test]
+fn live_cli_justification_fixture_preserves_contract_mapping_and_bytes() {
+    let Some(layouts) = host_layouts_dir() else {
+        return;
+    };
+    let work = WorkDir::new();
+    let home = IsolatedHome::new();
+    let path = work.path().join("alignment.lyx");
+    let original = fs::read_to_string(synthetic("paragraph_justification.lyx")).unwrap();
+    for setting in ["default", "true", "false"] {
+        let text = original.replace(
+            "\\justification default",
+            &format!("\\justification {setting}"),
+        );
+        fs::write(&path, &text).unwrap();
+        let before = fs::read(&path).unwrap();
+        let output = run_cli_with(&["preview", path_arg(&path)], &home, work.path());
+        assert_eq!(output.code, 0, "{}", output.stdout);
+        let value = parse_cli_json(&output);
+        assert_eq!(value["contract"], LIVE_CONTRACT);
+        assert_eq!(value["source"]["diskHash"], hash_text(&text));
+        let html = value["html"].as_str().unwrap();
+        let expected = if setting == "false" {
+            "left"
+        } else {
+            "justify"
+        };
+        for phrase in ["Default alignment:", "Explicit justified alignment:"] {
+            assert!(paragraph_opening(html, phrase).contains(&format!("text-align: {expected}")));
+        }
+        let ast = parse(&text, false).unwrap();
+        assert_eq!(lq::serialize(&ast), text);
+        let response = build_live_response(
+            &path,
+            &ast,
+            &text,
+            None,
+            Some(std::path::Path::new(&layouts)),
+            None,
+        )
+        .unwrap()
+        .response;
+        validate_live_response(&serde_json::to_value(&response).unwrap()).unwrap();
+        assert_phrase_maps_to_query(html, &response.tokens, &ast, "Default alignment:");
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+}
+
 fn valid_base() -> Value {
     json!({
         "contract": LIVE_CONTRACT,
@@ -2763,7 +3147,7 @@ fn live_renderer_help_userguide_lyx_script_line_nomencl_flex_emph() {
         .rfind("<div")
         .expect("wrapper for the widget paragraph");
     assert!(
-        html[widget_div..widget_at].contains(r#"style="line-height: 1""#),
+        html[widget_div..widget_at].contains("line-height: 1"),
         "LyX single paragraph spacing must set line-height"
     );
     assert!(html.contains(r#"class="longtable""#));

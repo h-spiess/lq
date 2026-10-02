@@ -107,10 +107,52 @@ pub struct LayoutHtml {
     pub font: Option<LayoutFont>,
 }
 
+/// Work-area alignment, kept out of the public HTML/schema structures.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum LayoutAlignment {
+    #[default]
+    Block,
+    Left,
+    Right,
+    Center,
+    Layout,
+}
+
+impl LayoutAlignment {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "block" => Some(Self::Block),
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            "center" => Some(Self::Center),
+            "layout" => Some(Self::Layout),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct LayoutRenderMetadata {
+    pub html: HashMap<String, LayoutHtml>,
+    pub alignments: HashMap<String, LayoutAlignment>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RawStyle {
     html: LayoutHtml,
     copy_style: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum AlignmentOperation {
+    Set(LayoutAlignment),
+    Copy(String),
+}
+
+#[derive(Clone, Debug)]
+enum LayoutAlignmentUpdate {
+    Style(String, Vec<AlignmentOperation>),
+    Remove(String),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -122,6 +164,7 @@ struct ParsedLayout {
     custom_insets: HashSet<String>,
     disallowed_insets: HashSet<String>,
     styles: HashMap<String, RawStyle>,
+    alignment_updates: Vec<LayoutAlignmentUpdate>,
 }
 
 fn empty_parsed() -> ParsedLayout {
@@ -173,6 +216,7 @@ fn parse_layout_text(
     let mut custom_insets = HashSet::new();
     let mut disallowed_insets = HashSet::new();
     let mut styles: HashMap<String, RawStyle> = HashMap::new();
+    let mut alignment_updates = Vec::new();
 
     let lines = split_layout_lines(text);
     let mut i = 0;
@@ -189,7 +233,8 @@ fn parse_layout_text(
         if let Some(rest) = strip_keyword(&line, "Style") {
             let style_name = unquote_layout_name(rest.trim());
             allowed.insert(style_name.clone());
-            let (raw, end) = parse_style_body(&lines, i);
+            let (raw, operations, end) = parse_style_body(&lines, i);
+            alignment_updates.push(LayoutAlignmentUpdate::Style(style_name.clone(), operations));
             i = end;
             let merged = merge_style(styles.get(&style_name), raw);
             if let Some(toc) = merged.html.toc_level {
@@ -201,7 +246,9 @@ fn parse_layout_text(
         }
 
         if let Some(rest) = strip_keyword(&line, "NoStyle") {
-            disallowed.insert(unquote_layout_name(rest.trim()));
+            let name = unquote_layout_name(rest.trim());
+            disallowed.insert(name.clone());
+            alignment_updates.push(LayoutAlignmentUpdate::Remove(name));
             i += 1;
             continue;
         }
@@ -209,7 +256,7 @@ fn parse_layout_text(
         if let Some(rest) = strip_keyword(&line, "InsetLayout") {
             let inset_name = unquote_layout_name(rest.trim());
             custom_insets.insert(inset_name.clone());
-            let (raw, end) = parse_style_body(&lines, i);
+            let (raw, _, end) = parse_style_body(&lines, i);
             i = end;
             let merged = merge_style(styles.get(&inset_name), raw);
             styles.insert(inset_name, merged);
@@ -238,6 +285,7 @@ fn parse_layout_text(
             }
             if let Some(found) = found_path {
                 let sub = parse_layout_file(&found, search_paths, visited)?;
+                alignment_updates.extend(sub.alignment_updates);
                 for s in sub.allowed {
                     allowed.insert(s);
                 }
@@ -273,6 +321,7 @@ fn parse_layout_text(
         custom_insets,
         disallowed_insets,
         styles,
+        alignment_updates,
     })
 }
 
@@ -410,8 +459,9 @@ fn strip_wrapping_quotes(s: &str) -> String {
     out
 }
 
-fn parse_style_body(lines: &[&str], start: usize) -> (RawStyle, usize) {
+fn parse_style_body(lines: &[&str], start: usize) -> (RawStyle, Vec<AlignmentOperation>, usize) {
     let mut style = RawStyle::default();
+    let mut alignment_operations = Vec::new();
     let mut i = start;
     while i + 1 < lines.len() {
         i += 1;
@@ -478,7 +528,15 @@ fn parse_style_body(lines: &[&str], start: usize) -> (RawStyle, usize) {
             continue;
         }
         if let Some(rest) = strip_keyword_ci(&body_line, "CopyStyle") {
-            style.copy_style = Some(unquote_layout_name(rest.trim()));
+            let name = unquote_layout_name(rest.trim());
+            alignment_operations.push(AlignmentOperation::Copy(name.clone()));
+            style.copy_style = Some(name);
+            continue;
+        }
+        if let Some(rest) = strip_keyword_ci(&body_line, "Align") {
+            if let Some(alignment) = LayoutAlignment::parse(first_token(rest)) {
+                alignment_operations.push(AlignmentOperation::Set(alignment));
+            }
             continue;
         }
         if let Some(rest) = strip_keyword_ci(&body_line, "LabelType") {
@@ -494,7 +552,7 @@ fn parse_style_body(lines: &[&str], start: usize) -> (RawStyle, usize) {
             continue;
         }
     }
-    (style, i)
+    (style, alignment_operations, i)
 }
 
 fn resolve_style(
@@ -521,6 +579,34 @@ fn resolve_style(
         out.font = merge_font(out.font.clone(), own.html.font.clone());
     }
     overlay_html_fields(&mut out, &own.html);
+    out
+}
+
+/// Replay only work-area alignment; CopyStyle copies the value at the read site.
+fn resolve_alignments(updates: &[LayoutAlignmentUpdate]) -> HashMap<String, LayoutAlignment> {
+    let mut out = HashMap::new();
+    for update in updates {
+        match update {
+            LayoutAlignmentUpdate::Style(name, operations) => {
+                let mut alignment = out.get(name).copied().unwrap_or_default();
+                for operation in operations {
+                    match operation {
+                        AlignmentOperation::Set(value) => alignment = *value,
+                        AlignmentOperation::Copy(source) if source != name => {
+                            if let Some(value) = out.get(source) {
+                                alignment = *value;
+                            }
+                        }
+                        AlignmentOperation::Copy(_) => {}
+                    }
+                }
+                out.insert(name.clone(), alignment);
+            }
+            LayoutAlignmentUpdate::Remove(name) => {
+                out.remove(name);
+            }
+        }
+    }
     out
 }
 
@@ -838,6 +924,7 @@ pub fn find_layout_file(file_name: &str, search_paths: &[PathBuf]) -> Option<Pat
 }
 
 fn merge_parsed(into: &mut ParsedLayout, sub: ParsedLayout) {
+    into.alignment_updates.extend(sub.alignment_updates);
     for s in sub.allowed {
         into.allowed.insert(s);
     }
@@ -912,15 +999,30 @@ pub fn get_layout_html_for_class(
     modules: &[&str],
     local: Option<&LocalLayoutTexts>,
 ) -> HashMap<String, LayoutHtml> {
+    get_layout_render_metadata(textclass, layouts_dir, modules, local).html
+}
+
+/// Load the existing class/module/local-layout chain once for Preview.
+pub(crate) fn get_layout_render_metadata(
+    textclass: &str,
+    layouts_dir: &[PathBuf],
+    modules: &[&str],
+    local: Option<&LocalLayoutTexts>,
+) -> LayoutRenderMetadata {
     let Ok(Some(parsed)) = load_parsed_for_class(textclass, layouts_dir, modules, local) else {
-        return HashMap::new();
+        return LayoutRenderMetadata::default();
     };
-    let mut out = HashMap::new();
+    let mut out = LayoutRenderMetadata {
+        html: HashMap::new(),
+        alignments: resolve_alignments(&parsed.alignment_updates),
+    };
+    out.alignments
+        .retain(|name, _| !parsed.disallowed.contains(name));
     for name in parsed.styles.keys() {
         if parsed.disallowed.contains(name) {
             continue;
         }
-        out.insert(
+        out.html.insert(
             name.clone(),
             resolve_style(name, &parsed.styles, &mut HashSet::new()),
         );

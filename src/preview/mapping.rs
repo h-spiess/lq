@@ -681,6 +681,55 @@ pub(crate) fn document_par_indent(ast: &Document) -> bool {
     )
 }
 
+/// Stock LyX enables screen justification; a document can explicitly disable it.
+pub(crate) fn document_justified(ast: &Document) -> bool {
+    let Some(header) = crate::tracked_changes::get_header(ast) else {
+        return true;
+    };
+    matches!(
+        find_property(ast, header, "justification").as_deref(),
+        None | Some("default" | "true")
+    )
+}
+
+/// Paragraph::getParLanguage uses the first character's font language.
+pub(crate) fn paragraph_is_rtl(ast: &Document, node: NodeId) -> bool {
+    let document_language = crate::tracked_changes::get_header(ast)
+        .and_then(|header| find_property(ast, header, "language"))
+        .unwrap_or_else(|| "english".to_string());
+    let mut language = document_language.as_str();
+    for &child in &ast.node(node).children {
+        match &ast.node(child).kind {
+            NodeKind::Property {
+                key,
+                value: Some(value),
+            } if key == "lang" => {
+                language = if value == "default" {
+                    document_language.as_str()
+                } else {
+                    value.as_str()
+                };
+            }
+            NodeKind::Text { text } if !text.is_empty() => break,
+            NodeKind::Block { tag, .. } if tag == "inset" => break,
+            _ => {}
+        }
+    }
+    // RTL languages in official LyX 2.5.1's lib/languages; arabic is a legacy alias.
+    matches!(
+        language,
+        "arabic"
+            | "arabic_arabi"
+            | "arabic_arabtex"
+            | "farsi"
+            | "hebrew"
+            | "nko"
+            | "syriac"
+            | "urdu"
+            | "uyghur"
+    )
+}
+
 /// Custom `\paragraph_indentation` length, if not `default`.
 pub(crate) fn document_par_indent_css(ast: &Document) -> Option<String> {
     let header = crate::tracked_changes::get_header(ast)?;
