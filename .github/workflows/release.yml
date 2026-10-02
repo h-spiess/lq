@@ -13,7 +13,14 @@ permissions:
   contents: write
 
 jobs:
+  checks:
+    name: Checks
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   build:
+    needs: checks
     name: ${{ matrix.asset }}
     strategy:
       fail-fast: false

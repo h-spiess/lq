@@ -1,9 +1,9 @@
 name: CI
 
 on:
-  push:
-  pull_request:
+  workflow_call:
 
+# Invoked by the Release workflow for version tags.
 # fmt is host-independent (Ubuntu only). Clippy lints the compiled crate, so
 # Ubuntu (unix cfg) and Windows (windows cfg). Tests run on every shipping OS.
 jobs:
